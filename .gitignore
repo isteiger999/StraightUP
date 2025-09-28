@@ -1,0 +1,61 @@
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python cache / bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+
+# IDEs / editors
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data / models / logs
+data/
+datasets/
+logs/
+checkpoints/
+*.npz
+*.npy
+*.csv
+*.h5
+*.hdf5
+
+# ML model binaries
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.onnx
+
+# Compiled / binary artifacts
+*.so
+*.dll
+*.lib
+*.dylib
+
+# matplotlib cache
+.mplcache/
+
+# Secrets / env
+.env

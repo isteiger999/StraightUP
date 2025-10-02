@@ -27,10 +27,11 @@ def plot_data():
     #plt.plot(data_test['timestamp'], acc_y, label='acc_y')
     #plt.plot(data_test['timestamp'], acc_z, label='acc_z')
     #plt.plot(data_test['timestamp'], data_test['grav_x'], label='grav_x')
-    plt.plot(data_test['timestamp'].iloc[-1000:], data_test['grav_y'].iloc[-1000:], label='grav_y')
+    plt.plot(data_test['timestamp'].iloc[-500:], data_test['grav_y'].iloc[-500:], label='grav_y')
     #plt.plot(data_test['timestamp'], data_test['grav_z'], label='grav_z')
     plt.xlabel("Time")
     plt.ylabel("Acceleration in x")
+    plt.title('total recording')
     plt.legend()
     plt.show()
 
@@ -55,9 +56,10 @@ def obtain_windows():
             X_train[i, :, :] = rec.iloc[index*timestep_window:(index+1)*timestep_window, :].values
             i += 1
             
-    plt.plot(np.arange(400), X_train[10, :, 12], label='grav_y')
+    plt.plot(np.arange(400), X_train[9, :, 12], label='grav_y')
     plt.xlabel("Time")
     plt.ylabel("Acceleration in x")
+    plt.title('1 out of 11 samples')
     plt.legend()
     plt.show()
     

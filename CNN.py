@@ -6,16 +6,27 @@ from sklearn.preprocessing import LabelEncoder
 
 X_train, y_train, X_test, y_test = UCR_UEA_datasets().load_dataset('StandWalkJump')
 
+# normalize
+for i in range(12):
+  for j in range(4):
+    X_train[i,:,j] = X_train[i,:,j] / max(X_train[i,:,j])
+
 cnn2 = models.Sequential([
     # cnn
-    layers.Conv1D(filters = 32, kernel_size = 20, activation = 'relu', input_shape=(2500, 4)),
-    layers.MaxPooling1D(pool_size=(2)), # Changed to MaxPooling1D
+    l# Layer 1
+    layers.Conv1D(filters=32, kernel_size=20, activation='relu', input_shape=(2500, 4)),
+    layers.MaxPooling1D(pool_size=2), # Output length: approx 1240
+
+    # Layer 2: Deeper features, more filters, smaller kernel
+    layers.Conv1D(filters=64, kernel_size=10, activation='relu'),
+    layers.MaxPooling1D(pool_size=2), # Output length: approx 615
 
     # fully connected
     layers.Flatten(),
-    layers.Dense(32, activation='relu'),
-    layers.Dense(3,activation='sigmoid')
+    layers.Dense(64, activation='relu'),
+    layers.Dense(3,activation='softmax')
 ])
+
 
 cnn2.compile(optimizer='adam',
             loss='sparse_categorical_crossentropy',    #later use 'sparse_categorical_crossentropy' --> gives most proable label, isntead of probabilities for each

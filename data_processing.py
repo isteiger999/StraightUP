@@ -35,3 +35,16 @@ plt.xlabel("Time")
 plt.ylabel("Acceleration in x")
 plt.legend()
 plt.show()
+
+## get windows
+f_sample = 25      # [Hz]
+window_length = 8  # [sec]
+windows = 10
+timesteps = f_sample * window_length * windows
+
+X_train = # shape: 50'000, timesteps(8*25), channels(13)
+index = 0
+for timestep in range(timesteps):
+    X_train[index, :, :] = rec[timestep:timestep + timesteps]
+    timestep += timesteps
+    index += 1

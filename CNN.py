@@ -1,46 +1,38 @@
-import torch
-import tensorflow as tf
-from tensorflow.keras import datasets, layers, models
-import numpy as np
+from tslearn.datasets import UCR_UEA_datasets
 from sklearn.preprocessing import LabelEncoder
+from keras import models, layers
 
-X_train, y_train, X_test, y_test = UCR_UEA_datasets().load_dataset('StandWalkJump')
+# 1. Load the TwoPatterns dataset
+X_train, y_train, X_test, y_test = UCR_UEA_datasets().load_dataset('TwoPatterns')
 
-# normalize
-for i in range(12):
-  for j in range(4):
-    X_train[i,:,j] = X_train[i,:,j] / max(X_train[i,:,j])
+# Check the new shape: (1000, 128, 1)
+print(f"New X_train shape: {X_train.shape}")
+print(f"New X_test shape: {X_test.shape}")
 
-cnn2 = models.Sequential([
-    # cnn
-    l# Layer 1
-    layers.Conv1D(filters=32, kernel_size=20, activation='relu', input_shape=(2500, 4)),
-    layers.MaxPooling1D(pool_size=2), # Output length: approx 1240
-
-    # Layer 2: Deeper features, more filters, smaller kernel
-    layers.Conv1D(filters=64, kernel_size=10, activation='relu'),
-    layers.MaxPooling1D(pool_size=2), # Output length: approx 615
-
-    # fully connected
-    layers.Flatten(),
-    layers.Dense(64, activation='relu'),
-    layers.Dense(3,activation='softmax')
-])
-
-
-cnn2.compile(optimizer='adam',
-            loss='sparse_categorical_crossentropy',    #later use 'sparse_categorical_crossentropy' --> gives most proable label, isntead of probabilities for each
-            metrics=['accuracy'])
-
+# 2. Encode the Labels (Still necessary as the labels are strings)
 le = LabelEncoder()
-le.fit(y_train)
-
-y_train_encoded = le.transform(y_train)
+y_train_encoded = le.fit_transform(y_train)
 y_test_encoded = le.transform(y_test)
 
-print("Original Labels:", le.classes_)
-print("Encoded Labels (Train Sample):", y_train_encoded[:5])
-print(y_train_encoded)
+# 3. Adjust the CNN Model (Crucial changes for a Univariate dataset!)
+# The new input shape is (128, 1)
+cnn_new = models.Sequential([
+    # Input shape is (Timesteps, Channels) -> (128, 1)
+    layers.Conv1D(filters=32, kernel_size=8, activation='relu', input_shape=(128, 1)),
+    layers.MaxPooling1D(pool_size=2), 
 
-cnn2.fit(X_train, y_train_encoded, epochs=10)
-cnn2.evaluate(X_test, y_test_encoded)
+    layers.Conv1D(filters=64, kernel_size=5, activation='relu'),
+    layers.MaxPooling1D(pool_size=2),
+
+    layers.Flatten(),
+    layers.Dense(32, activation='relu'),
+    # TwoPatterns is a 4-class dataset
+    layers.Dense(4, activation='softmax') # MUST be 4 classes for TwoPatterns
+])
+
+cnn_new.compile(optimizer='adam',
+                loss='sparse_categorical_crossentropy', 
+                metrics=['accuracy'])
+
+cnn_new.fit(X_train, y_train_encoded, epochs=10)
+cnn_new.evaluate(X_test, y_test_encoded)

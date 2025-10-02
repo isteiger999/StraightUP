@@ -1,4 +1,4 @@
-from tslearn.datasets import UCR_UEA_datasets
+#from tslearn.datasets import UCR_UEA_datasets
 from sklearn.preprocessing import LabelEncoder
 from keras import models, layers
 

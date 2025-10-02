@@ -1,5 +1,7 @@
+from data_processing import plot_data
+
 def main():
-    print("hi")
+    plot_data()
 
 
 

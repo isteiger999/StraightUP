@@ -48,4 +48,18 @@ checkpoints/
 *.bin
 *.onnx
 
-# Compil
+# Compiled / binary artifacts
+*.so
+*.dll
+*.lib
+*.dylib
+
+# matplotlib cache
+.mplcache/
+
+# Secrets / env
+.env
+
+# --- allow CSVs inside these two folders (override *.csv above) ---
+!/slouch_data/**/*.csv
+!/no_slouch_data/**/*.csv

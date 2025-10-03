@@ -2,10 +2,20 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from scipy import signal
+from pathlib import Path   # to cycle through csv files in folders
 
+def drop_timestamp_inplace(folders):
+    for folder in map(Path, folders):
+        for csv_path in folder.glob("*.csv"):
+            df = pd.read_csv(csv_path, low_memory=False)
+            if "timestamp" in df.columns:
+                df = df.drop(columns=["timestamp"])
+                df.to_csv(csv_path, index=False)
+            else:
+                pass
 
 def plot_data():
-    data_test = pd.read_csv(r"Data_Airpods/airpods_motion_erster_test.csv", na_values=['NA'])
+    data_test = pd.read_csv(r"slouch_data/slouch0.csv", na_values=['NA'])
 
     offset_time = data_test.iloc[0, 0]
     data_test['timestamp'] = data_test['timestamp'] - offset_time
@@ -20,15 +30,7 @@ def plot_data():
     grav_z = data_test['grav_z']
     grav_tot = np.sqrt(grav_x**2 + grav_y**2 + grav_z**2)
 
-    #plt.plot(data_test['timestamp'], acc_tot, label='acc_tot')
-    #plt.plot(data_test['timestamp'], acc_x, label='acc_x')
-    #plt.plot(data_test['timestamp'], acc_y, label='acc_y')
-    #plt.plot(data_test['timestamp'], acc_x, label='acc_x')
-    #plt.plot(data_test['timestamp'], acc_y, label='acc_y')
-    #plt.plot(data_test['timestamp'], acc_z, label='acc_z')
-    #plt.plot(data_test['timestamp'], data_test['grav_x'], label='grav_x')
     plt.plot(data_test['timestamp'].iloc[-500:], data_test['grav_y'].iloc[-500:], label='grav_y')
-    #plt.plot(data_test['timestamp'], data_test['grav_z'], label='grav_z')
     plt.xlabel("Time")
     plt.ylabel("Acceleration in x")
     plt.title('total recording')
@@ -40,29 +42,36 @@ def obtain_windows():
     window_length = 8  # [sec]
     timestep_window = f_sample * window_length
     windows_tot = 22
-    samples = 11
-    chanels = 14
+    samples_slouch = 5 * 11
+    samples_noslouch = 3 * 22
+    samples_tot = samples_slouch + samples_noslouch
+    chanels = 13
 
-    rec = pd.read_csv(r"Data_Airpods/airpods_motion_erster_test.csv", na_values=['NA'])
-    offset_time = rec.iloc[0, 0]
-    rec['timestamp'] = rec['timestamp'] - offset_time
+    X_tot = np.zeros((samples_tot, timestep_window, chanels)) # shape: 50'000, timesteps(8*25), channels(13)
+    y_tot = np.zeros((samples_tot, 1))
 
-    X_train = np.zeros((samples, timestep_window, chanels)) # shape: 50'000, timesteps(8*25), channels(13)
-    y_train = np.ones((chanels, 1))
 
-    i = 0
-    for index in range(windows_tot):
-        if index % 2 != 0 and index != 0:
-            X_train[i, :, :] = rec.iloc[index*timestep_window:(index+1)*timestep_window, :].values
-            i += 1
-            
-    plt.plot(np.arange(400), X_train[9, :, 12], label='grav_y')
-    plt.xlabel("Time")
-    plt.ylabel("Acceleration in x")
-    plt.title('1 out of 11 samples')
-    plt.legend()
-    plt.show()
+    ## for SLOUCH data ##
+    slouch_count = 0
+    folder = Path("slouch_data")
+    for rec in folder.glob("*.csv"):
+        df = pd.read_csv(rec, na_values=['NA'])    
+        for index in range(windows_tot):
+            if index % 2 != 0 and index != 0:
+                X_tot[slouch_count, :, :] = df.iloc[index*timestep_window:(index+1)*timestep_window, :].values
+                y_tot[slouch_count] = 1
+                slouch_count += 1
+
+    ## for NO_SLOUCH data ##. (can use all 22 windows instead of only 11)
+    folder = Path("no_slouch_data")
+    no_slouch_count = 0
+    for rec in folder.glob("*.csv"):
+        df = pd.read_csv(rec, na_values=['NA'])      
+        for index in range(windows_tot):
+            X_tot[slouch_count + index, :, :] = df.iloc[index*timestep_window:(index+1)*timestep_window, :].values
+            y_tot[slouch_count + index] = 0
+            no_slouch_count += 1
+
+    print(f"X_tot shape: {X_tot.shape}; y_tot shape: {y_tot.shape}")
     
-    # hihihi
-
-    return X_train, y_train
+    return X_tot, y_tot

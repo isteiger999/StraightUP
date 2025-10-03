@@ -3,6 +3,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from scipy import signal
 from pathlib import Path   # to cycle through csv files in folders
+from sklearn.preprocessing import StandardScaler   # for the normalization of X_train
+from sklearn.model_selection import train_test_split
 
 def drop_timestamp_inplace(folders):
     for folder in map(Path, folders):
@@ -13,6 +15,29 @@ def drop_timestamp_inplace(folders):
                 df.to_csv(csv_path, index=False)
             else:
                 pass
+
+def normalize(X_tot, y_tot):
+    # 1. Split the dataset into Train + Test
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_tot, y_tot,
+        test_size=0.2,          # 20% test
+        stratify=y_tot,         # keep 1/0 ratio the same
+        shuffle=True,           # break your class-ordered rows
+        random_state=42         # reproducible
+    )
+
+    # X: (N, T, F) e.g., (220, 400, 13)
+    N_tr, T, F = X_train.shape
+
+    scaler = StandardScaler()
+    X_train_2d = X_train.reshape(-1, F)          # (N*T, F)
+    X_test_2d  = X_test.reshape(-1, F)
+
+    scaler.fit(X_train_2d)                        # fit on TRAIN ONLY
+    X_train = scaler.transform(X_train_2d).reshape(N_tr, T, F)
+    X_test  = scaler.transform(X_test_2d).reshape(X_test.shape[0], T, F)
+
+    return X_train, X_test, y_train, y_test
 
 def plot_data():
     data_test = pd.read_csv(r"slouch_data/slouch0.csv", na_values=['NA'])
@@ -42,8 +67,8 @@ def obtain_windows():
     window_length = 8  # [sec]
     timestep_window = f_sample * window_length
     windows_tot = 22
-    samples_slouch = 5 * 11
-    samples_noslouch = 3 * 22
+    samples_slouch = sum(1 for _ in Path("slouch_data").glob("*.csv")) * 11
+    samples_noslouch = sum(1 for _ in Path("no_slouch_data").glob("*.csv")) * 22
     samples_tot = samples_slouch + samples_noslouch
     chanels = 13
 

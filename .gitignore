@@ -48,14 +48,4 @@ checkpoints/
 *.bin
 *.onnx
 
-# Compiled / binary artifacts
-*.so
-*.dll
-*.lib
-*.dylib
-
-# matplotlib cache
-.mplcache/
-
-# Secrets / env
-.env
+# Compil

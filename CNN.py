@@ -1,39 +1,46 @@
-from keras import models, layers
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau # to find the right amount of epochs and not overfit
+import tensorflow as tf
+from tensorflow.keras import layers, models, regularizers
 
 def CNN_model(X_train, X_test, y_train, y_test):
 
-    # Adjust the CNN Model (Crucial changes for a Univariate dataset!)
+    l2 = regularizers.l2(1e-4)
+
     # The new input shape is (400, 13)
     cnn = models.Sequential([
         # Input shape is (Timesteps, Channels) -> (400, 13)
-        layers.Conv1D(filters=32, kernel_size=14, activation='relu', input_shape=(400, 13)),
-        layers.MaxPooling1D(pool_size=2), 
+        layers.Conv1D(filters=32, kernel_size=11, padding="same", activation="relu", kernel_regularizer=l2),
+        layers.MaxPooling1D(2),
 
-        layers.Conv1D(filters=64, kernel_size=10, activation='relu'),
-        layers.MaxPooling1D(pool_size=2),
+        layers.Conv1D(64, 9, padding="same", activation="relu", kernel_regularizer=l2),
+        layers.MaxPooling1D(2),
 
-        layers.Conv1D(filters=128, kernel_size=8, activation='relu'),
-        layers.MaxPooling1D(pool_size=2),
+        layers.Conv1D(96, 7, padding="same", activation="relu", kernel_regularizer=l2),
+        layers.MaxPooling1D(2),
 
-        layers.Flatten(),
-        layers.Dense(128, activation='relu'),
-        layers.Dense(64, activation='relu'),
-        layers.Dense(32, activation='relu'),
-        layers.Dense(2, activation='softmax') 
+        layers.GlobalAveragePooling1D(),
+        layers.Dropout(0.30),
+        layers.Dense(64, activation="relu", kernel_regularizer=l2),
+        layers.Dropout(0.20),
+        layers.Dense(1, activation="sigmoid")   # predicts P(class=1) (thats why output only 1D)
     ])
 
-    cnn.compile(optimizer='adam',
-                    loss='sparse_categorical_crossentropy', 
-                    metrics=['accuracy'])
+    cnn.compile(
+        optimizer=tf.keras.optimizers.Adam(1e-3),
+        loss="binary_crossentropy",
+        metrics=["accuracy",
+                tf.keras.metrics.AUC(name="roc_auc"),
+                tf.keras.metrics.AUC(curve="PR", name="pr_auc")]
+    )
 
     print(f"X_train shape: {X_train.shape}; y_train shape: {y_train.shape}")
     print(f"X_test shape: {X_test.shape}; y_test shape: {y_test.shape}")
 
-    ## find optimal amount of epochs with 'patience'
+    ## find optimal amount of epochs with 'patience'          
     callbacks = [
-        EarlyStopping(monitor="val_loss", patience=15, restore_best_weights=True),  # patience 10: means even though validation error might not decrease anymore, we still go 10 epochs further to check if it really increases or just local minimum
-        ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=3)               # multiplies learning rate by 0.5 if after 3 epochs validation error does not decrease 
+        tf.keras.callbacks.EarlyStopping(monitor="val_pr_auc", mode="max",
+                                        patience=10, restore_best_weights=True), # patience 10: means even though validation error might not decrease anymore, we still go 10 epochs further to check if it really increases or just local minimum
+        tf.keras.callbacks.ReduceLROnPlateau(monitor="val_pr_auc", mode="max",
+                                            factor=0.5, patience=3)              # multiplies learning rate by 0.5 if after 3 epochs validation error does not decrease 
     ]
 
     history = cnn.fit(

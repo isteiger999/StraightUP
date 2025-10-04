@@ -5,6 +5,13 @@ from scipy import signal
 from pathlib import Path   # to cycle through csv files in folders
 from sklearn.preprocessing import StandardScaler   # for the normalization of X_train
 from sklearn.model_selection import train_test_split
+from constants import FEATURE_ORDER
+
+def _assert_and_order(df: pd.DataFrame) -> pd.DataFrame:
+    missing = [c for c in FEATURE_ORDER if c not in df.columns]
+    if missing:
+        raise ValueError(f"CSV missing expected columns: {missing}")
+    return df[FEATURE_ORDER]  # <-- enforce exact order
 
 def drop_timestamp_inplace(folders):
     for folder in map(Path, folders):
@@ -72,7 +79,8 @@ def obtain_windows():
     slouch_count = 0
     folder = Path("slouch_data")
     for rec in folder.glob("*.csv"):
-        df = pd.read_csv(rec, na_values=['NA'])    
+        df = pd.read_csv(rec, na_values=['NA'])
+        df = _assert_and_order(df)    
         for index in range(windows_tot):
             if index % 2 != 0 and index != 0:
                 X_tot[slouch_count, :, :] = df.iloc[index*timestep_window:(index+1)*timestep_window, :].values

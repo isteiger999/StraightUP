@@ -11,7 +11,7 @@ def train_test(X_tot, y_tot):
     # 1. Split the dataset into Train + Test
     X_train, X_test, y_train, y_test = train_test_split(
         X_tot, y_tot,
-        test_size=0.2,          # 20% test
+        test_size=0.25,          # 20% test
         stratify=y_tot,         # keep 1/0 ratio the same
         shuffle=True,           # break your class-ordered rows
         random_state=42         # reproducible
@@ -21,6 +21,20 @@ def train_test(X_tot, y_tot):
     X_test  = X_test.astype("float32")
 
     return X_train, X_test, y_train, y_test
+
+def count_all_zero_windows(X):
+    """
+    X: np.ndarray of shape (N, 400, 14)
+    Prints how many windows X[s, :, :] are entirely zeros.
+    Returns (count, indices_array).
+    """
+    zero_mask = np.all(X == 0, axis=(1, 2))  # True where whole window is zeros
+    count = int(zero_mask.sum())
+    idxs = np.flatnonzero(zero_mask)
+    print(f"{count} all-zero windows out of {X.shape[0]}")
+    if count:
+        print("indices:", idxs.tolist())
+    return count, idxs
 
 def plot_data():
     data_test = pd.read_csv(r"slouch_data/slouch0.csv", na_values=['NA'])
@@ -101,6 +115,7 @@ def obtain_windows():
     ## for NO_SLOUCH data ##. (can use all 22 windows instead of only 11)
     folder = Path("no_slouch_data")
     no_slouch_count = 0
+    index2 = 0
     for rec in folder.glob("*.csv"):
         df = pd.read_csv(rec, na_values=['NA'])
         # add 14th signal (Tate-Bryan angle)
@@ -108,10 +123,9 @@ def obtain_windows():
         df["pitch_rad"] = [quat_pitch_xyzw(x,y,z,w) for x,y,z,w in zip(px,py,pz,pw)]
         df = _assert_and_order(df)
         for index in range(windows_tot):
-            X_tot[slouch_count + index, :, :] = df.iloc[index*timestep_window:(index+1)*timestep_window, :].values
-            y_tot[slouch_count + index] = 0
+            X_tot[index2 + slouch_count + index, :, :] = df.iloc[index*timestep_window:(index+1)*timestep_window, :].values
+            y_tot[index2 + slouch_count + index] = 0
             no_slouch_count += 1
+        index2 += 22
 
-    print(f"X_tot shape: {X_tot.shape}; y_tot shape: {y_tot.shape}")
-    
     return X_tot, y_tot

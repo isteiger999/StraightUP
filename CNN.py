@@ -40,9 +40,6 @@ def CNN_model(X_train, X_test, y_train, y_test):
                 tf.keras.metrics.AUC(curve="PR", name="pr_auc")]
     )
 
-    print(f"X_train shape: {X_train.shape}; y_train shape: {y_train.shape}")
-    print(f"X_test shape: {X_test.shape}; y_test shape: {y_test.shape}")
-
     ## find optimal amount of epochs with 'patience'          
     callbacks = [
         tf.keras.callbacks.EarlyStopping(monitor="val_pr_auc", mode="max",
@@ -59,8 +56,6 @@ def CNN_model(X_train, X_test, y_train, y_test):
         shuffle=True,              # Keras shuffles each epoch for arrays by default
         callbacks=callbacks
     )
-    print("Eval Score:")
-    cnn.evaluate(X_test, y_test)
     
     return cnn
 

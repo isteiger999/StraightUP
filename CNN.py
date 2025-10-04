@@ -12,9 +12,9 @@ def CNN_model(X_train, X_test, y_train, y_test):
     norm = layers.Normalization(axis=-1)
     norm.adapt(X_train.astype("float32"))  # TRAIN ONLY
     
-    # The new input shape is (400, 13)
+    # The new input shape is (400, 14)
     cnn = models.Sequential([
-        layers.Input(shape=(400, 13)),
+        layers.Input(shape=(400, 14)),
         norm,
         layers.Conv1D(filters=32, kernel_size=11, padding="same", activation="relu", kernel_regularizer=l2),
         layers.MaxPooling1D(2),
@@ -71,7 +71,7 @@ def export_coreml(model, out_path="PostureCNN.mlpackage"):
         source="tensorflow",
         convert_to="mlprogram",
         inputs=[ct.TensorType(name=model.inputs[0].name.split(":")[0],
-                              shape=(1, 400, 13), dtype=np.float32)]
+                              shape=(1, 400, 14), dtype=np.float32)]
     )
     mlmodel.save(out_path)   # <- .mlpackage
     print(f"✅ Saved {out_path}")

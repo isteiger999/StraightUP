@@ -7,22 +7,6 @@ from sklearn.preprocessing import StandardScaler   # for the normalization of X_
 from sklearn.model_selection import train_test_split
 from constants import FEATURE_ORDER
 
-def _assert_and_order(df: pd.DataFrame) -> pd.DataFrame:
-    missing = [c for c in FEATURE_ORDER if c not in df.columns]
-    if missing:
-        raise ValueError(f"CSV missing expected columns: {missing}")
-    return df[FEATURE_ORDER]  # <-- enforce exact order
-
-def drop_timestamp_inplace(folders):
-    for folder in map(Path, folders):
-        for csv_path in folder.glob("*.csv"):
-            df = pd.read_csv(csv_path, low_memory=False)
-            if "timestamp" in df.columns:
-                df = df.drop(columns=["timestamp"])
-                df.to_csv(csv_path, index=False)
-            else:
-                pass
-
 def train_test(X_tot, y_tot):
     # 1. Split the dataset into Train + Test
     X_train, X_test, y_train, y_test = train_test_split(
@@ -61,6 +45,29 @@ def plot_data():
     plt.legend()
     plt.show()
 
+def _assert_and_order(df: pd.DataFrame) -> pd.DataFrame:
+    missing = [c for c in FEATURE_ORDER if c not in df.columns]
+    if missing:
+        raise ValueError(f"CSV missing expected columns: {missing}")
+    return df[FEATURE_ORDER]  # <-- enforce exact order
+
+def quat_pitch_xyzw(x, y, z, w):
+    # Tait-Bryan pitch (rotation about Y), consistent with common iOS convention
+    sinp = 2.0 * (w*y - z*x)
+    if np.abs(sinp) >= 1:
+        return np.sign(sinp) * (np.pi/2)  # clamp
+    return np.arcsin(sinp)
+
+def drop_timestamp_inplace(folders):
+    for folder in map(Path, folders):
+        for csv_path in folder.glob("*.csv"):
+            df = pd.read_csv(csv_path, low_memory=False)
+            if "timestamp" in df.columns:
+                df = df.drop(columns=["timestamp"])
+                df.to_csv(csv_path, index=False)
+            else:
+                pass
+
 def obtain_windows():
     f_sample = 50      # [Hz].  (actually 50.07 Hz) 180sekunden --> 12.6 frames = 0.252s
     window_length = 8  # [sec]
@@ -69,9 +76,9 @@ def obtain_windows():
     samples_slouch = sum(1 for _ in Path("slouch_data").glob("*.csv")) * 11
     samples_noslouch = sum(1 for _ in Path("no_slouch_data").glob("*.csv")) * 22
     samples_tot = samples_slouch + samples_noslouch
-    chanels = 13
+    chanels = 14            # 13 + pitch_rad
 
-    X_tot = np.zeros((samples_tot, timestep_window, chanels)) # shape: 50'000, timesteps(8*25), channels(13)
+    X_tot = np.zeros((samples_tot, timestep_window, chanels)) # shape: 50'000, timesteps(8*50), channels(14)
     y_tot = np.zeros((samples_tot, 1))
 
 
@@ -80,7 +87,11 @@ def obtain_windows():
     folder = Path("slouch_data")
     for rec in folder.glob("*.csv"):
         df = pd.read_csv(rec, na_values=['NA'])
-        df = _assert_and_order(df)    
+        # add 14th signal (Tate-Bryan angle)
+        px, py, pz, pw = df["quat_x"], df["quat_y"], df["quat_z"], df["quat_w"]
+        df["pitch_rad"] = [quat_pitch_xyzw(x,y,z,w) for x,y,z,w in zip(px,py,pz,pw)]
+        df = _assert_and_order(df)
+
         for index in range(windows_tot):
             if index % 2 != 0 and index != 0:
                 X_tot[slouch_count, :, :] = df.iloc[index*timestep_window:(index+1)*timestep_window, :].values
@@ -91,7 +102,11 @@ def obtain_windows():
     folder = Path("no_slouch_data")
     no_slouch_count = 0
     for rec in folder.glob("*.csv"):
-        df = pd.read_csv(rec, na_values=['NA'])      
+        df = pd.read_csv(rec, na_values=['NA'])
+        # add 14th signal (Tate-Bryan angle)
+        px, py, pz, pw = df["quat_x"], df["quat_y"], df["quat_z"], df["quat_w"]
+        df["pitch_rad"] = [quat_pitch_xyzw(x,y,z,w) for x,y,z,w in zip(px,py,pz,pw)]
+        df = _assert_and_order(df)
         for index in range(windows_tot):
             X_tot[slouch_count + index, :, :] = df.iloc[index*timestep_window:(index+1)*timestep_window, :].values
             y_tot[slouch_count + index] = 0

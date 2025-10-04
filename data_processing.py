@@ -16,7 +16,7 @@ def drop_timestamp_inplace(folders):
             else:
                 pass
 
-def normalize(X_tot, y_tot):
+def train_test(X_tot, y_tot):
     # 1. Split the dataset into Train + Test
     X_train, X_test, y_train, y_test = train_test_split(
         X_tot, y_tot,
@@ -25,17 +25,9 @@ def normalize(X_tot, y_tot):
         shuffle=True,           # break your class-ordered rows
         random_state=42         # reproducible
     )
-
-    # X: (N, T, F) e.g., (220, 400, 13)
-    N_tr, T, F = X_train.shape
-
-    scaler = StandardScaler()
-    X_train_2d = X_train.reshape(-1, F)          # (N*T, F)
-    X_test_2d  = X_test.reshape(-1, F)
-
-    scaler.fit(X_train_2d)                        # fit on TRAIN ONLY
-    X_train = scaler.transform(X_train_2d).reshape(N_tr, T, F)
-    X_test  = scaler.transform(X_test_2d).reshape(X_test.shape[0], T, F)
+    
+    X_train = X_train.astype("float32")
+    X_test  = X_test.astype("float32")
 
     return X_train, X_test, y_train, y_test
 

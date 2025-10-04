@@ -1,12 +1,17 @@
-from data_processing import plot_data, obtain_windows, drop_timestamp_inplace, normalize
-from CNN import CNN_model
+from data_processing import plot_data, obtain_windows, drop_timestamp_inplace, train_test
+from CNN import CNN_model, export_coreml
+import warnings
+from urllib3.exceptions import NotOpenSSLWarning
+warnings.filterwarnings("ignore", category=NotOpenSSLWarning)
+
 
 def main():
-    #plot_data()
+
     drop_timestamp_inplace(["slouch_data", "no_slouch_data"])
     X_tot, y_tot = obtain_windows()
-    X_train, X_test, y_train, y_test = normalize(X_tot, y_tot)
-    CNN_model(X_train, X_test, y_train, y_test)
+    X_train, X_test, y_train, y_test = train_test(X_tot, y_tot)
+    cnn = CNN_model(X_train, X_test, y_train, y_test)
+    export_coreml(cnn)
 
 
 if __name__ == '__main__':

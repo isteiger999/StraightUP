@@ -1,13 +1,21 @@
 import tensorflow as tf
 from tensorflow.keras import layers, models, regularizers
+import coremltools as ct
+import numpy as np
 
 def CNN_model(X_train, X_test, y_train, y_test):
 
+    # Regularization for weights inside filters
     l2 = regularizers.l2(1e-4)
 
+    # Adding Normalization layer into CNN and train it on RAW X_train (yes X_train itself is not normalized)
+    norm = layers.Normalization(axis=-1)
+    norm.adapt(X_train.astype("float32"))  # TRAIN ONLY
+    
     # The new input shape is (400, 13)
     cnn = models.Sequential([
-        # Input shape is (Timesteps, Channels) -> (400, 13)
+        layers.Input(shape=(400, 13)),
+        norm,
         layers.Conv1D(filters=32, kernel_size=11, padding="same", activation="relu", kernel_regularizer=l2),
         layers.MaxPooling1D(2),
 
@@ -18,14 +26,14 @@ def CNN_model(X_train, X_test, y_train, y_test):
         layers.MaxPooling1D(2),
 
         layers.GlobalAveragePooling1D(),
-        layers.Dropout(0.30),
+        layers.Dropout(0.30),                   # means random 30% of neurons get deactivated
         layers.Dense(64, activation="relu", kernel_regularizer=l2),
         layers.Dropout(0.20),
         layers.Dense(1, activation="sigmoid")   # predicts P(class=1) (thats why output only 1D)
     ])
 
     cnn.compile(
-        optimizer=tf.keras.optimizers.Adam(1e-3),
+        optimizer=tf.keras.optimizers.legacy.Adam(1e-3),
         loss="binary_crossentropy",
         metrics=["accuracy",
                 tf.keras.metrics.AUC(name="roc_auc"),
@@ -43,7 +51,7 @@ def CNN_model(X_train, X_test, y_train, y_test):
                                             factor=0.5, patience=3)              # multiplies learning rate by 0.5 if after 3 epochs validation error does not decrease 
     ]
 
-    history = cnn.fit(
+    cnn.fit(
         X_train, y_train,
         validation_split=0.2,      # or validation_data=(X_val, y_val)
         epochs=200,                # goes maximally up to 200 epochs
@@ -53,3 +61,17 @@ def CNN_model(X_train, X_test, y_train, y_test):
     )
     print("Eval Score:")
     cnn.evaluate(X_test, y_test)
+    
+    return cnn
+
+
+def export_coreml(model, out_path="PostureCNN.mlpackage"):
+    mlmodel = ct.convert(
+        model,
+        source="tensorflow",
+        convert_to="mlprogram",
+        inputs=[ct.TensorType(name=model.inputs[0].name.split(":")[0],
+                              shape=(1, 400, 13), dtype=np.float32)]
+    )
+    mlmodel.save(out_path)   # <- .mlpackage
+    print(f"✅ Saved {out_path}")

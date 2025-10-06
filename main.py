@@ -20,6 +20,7 @@ def main():
     print(f"X_test shape: {X_test.shape}; y_test shape: {y_test.shape}")
     print("Eval Score:")
     cnn.evaluate(X_test, y_test)
+    print("Done evaluating")
     export_coreml(cnn)
 
 if __name__ == '__main__':

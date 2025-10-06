@@ -12,13 +12,16 @@ FEATURE_ORDER = [
 '''
 python generate_beep_schedule_5m15s.py --participant Ivan0 \
   --minutes 5 --cycle-len 15 --jitter 1.0 --initial-delay 2.0 --make-wav \
-  --movements "normal_slouch,fast_slouch,micro_slouch,lateral_left,lateral_right,neck_only,reach_left,reach_right"
+  --movements "normal_slouch,fast_slouch,micro_slouch,lateral_left,lateral_right,neck_only,reach_left,reach_right" \
+  --complete-plan
 '''
 
-# To create detector
 '''
-python infer_events_from_beeps.py \
-  --imu-csv /slouch_data/airpods_motion_1759773950.csv \
-  --schedule-csv /beep_schedules_Ivan/beep_schedule_Ivan.csv \
-  --out-csv /beep_schedules_Ivan/events_inferred_template_Ivan.csv
+# individually
+python batch_infer_events.py --participants Ivan0 --verbose
+'''
+
+'''
+# Everyone
+python batch_infer_events.py --verbose
 '''

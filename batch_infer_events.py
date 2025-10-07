@@ -47,8 +47,7 @@ FALLBACK_OFFSETS = {
 WRITE_DEBUG = True  # set False to stop writing events_debug_*.csv
 # ===========================================================================
 
-
-# ---------- helpers for columns and features ----------
+# ---------- helpers ----------
 def find_col(df: "pd.DataFrame", patterns: List[str]) -> Optional[str]:
     for pat in patterns:
         rx = re.compile(pat, re.IGNORECASE)
@@ -58,7 +57,6 @@ def find_col(df: "pd.DataFrame", patterns: List[str]) -> Optional[str]:
     return None
 
 def normalize_time_units_by_dt(t_raw: np.ndarray) -> Tuple[np.ndarray, str]:
-    """Normalize time to seconds using median dt, not absolute magnitude."""
     t = t_raw.astype(float)
     tn = t[np.isfinite(t)]
     if len(tn) < 3:
@@ -68,7 +66,6 @@ def normalize_time_units_by_dt(t_raw: np.ndarray) -> Tuple[np.ndarray, str]:
     if len(dtn) == 0:
         return t, "unknown"
     dt_med = float(np.median(np.abs(dtn)))
-    # Heuristics: ~0.02 -> s, ~20 -> ms, ~2e4 -> us, ~2e7 -> ns
     if dt_med > 5e6:
         return t / 1e9, "ns->s"
     elif dt_med > 5e3:
@@ -139,12 +136,10 @@ def first_run_above(x: np.ndarray, th: float, run_len: int) -> Optional[int]:
             cnt = 0
     return None
 
-
 # ---------- axis-adaptive detection ----------
 def detect_for_axis(angle, dangle, gyromag, t, fs, i_beep, i0b, i1s,
                     dtheta_in: float, theta_hold: float,
                     strict: bool, axis_name: str):
-    """Return dict with onset_idx, hold_idx, onset_score, dtheta, and axis."""
     base_ang = float(np.nanmean(angle[max(0,i0b):i_beep]))
     base_gm  = float(np.nanmean(gyromag[max(0,i0b):i_beep]))
     std_gm   = float(np.nanstd(gyromag[max(0,i0b):i_beep])) + 1e-6
@@ -189,7 +184,6 @@ def detect_for_axis(angle, dangle, gyromag, t, fs, i_beep, i0b, i1s,
             "onset_score": score, "dtheta": dtheta,
             "base_ang": base_ang, "base_gm": base_gm, "std_gm": std_gm,
             "axis": axis_name}
-
 
 # ---------- one-session inference ----------
 def infer_events_for_session(imu_csv: str, schedule_csv: str, out_csv: str,
@@ -250,7 +244,7 @@ def infer_events_for_session(imu_csv: str, schedule_csv: str, out_csv: str,
         if WRITE_DEBUG:
             with open(debug_csv, "w", newline="") as f:
                 csv.writer(f).writerow(["t_beep","event","type","axis_chosen","onset_time","hold_time","onset_score","dtheta","max_pitch","max_roll"])
-        return {"events": 0, "holds": 0, "beeps_in_range": 0, "beeps_total": 0, "shift": shift}
+        return {"events": 0, "holds_total": 0, "holds_detected": 0, "beeps_in_range": 0, "beeps_total": 0, "shift": shift}
 
     # Count only positives as the denominator (skip hard negatives)
     def movement_type(val: str) -> str:
@@ -259,26 +253,23 @@ def infer_events_for_session(imu_csv: str, schedule_csv: str, out_csv: str,
     hard_negs = {"neck_only","reach_left","reach_right","reach","twist"}
     beeps["mv"] = beeps["value"].astype(str).apply(movement_type)
     beeps["is_neg"] = beeps["mv"].isin(hard_negs)
-    beeps_pos_total = int(beeps[~beeps["is_neg"]].shape[0])
+    beeps_pos = beeps[~beeps["is_neg"]].copy()
+    beeps_pos_total = int(beeps_pos.shape[0])
 
     def idx(ts): return int(np.searchsorted(t, ts, side="left"))
 
     out_rows = []; dbg_rows = []
-    holds = 0; beeps_in_range = 0
+    holds_total = 0; holds_detected = 0; beeps_in_range = 0
 
-    for _, r in beeps.iterrows():
-        ev = str(r["event"]); mv = str(r["mv"]); is_neg = bool(r["is_neg"])
-        if is_neg:
-            # hard negative — skip labeling (no slouch events should be produced)
-            continue
-
+    for _, r in beeps_pos.iterrows():
+        ev = str(r["event"]); mv = str(r["mv"])
         t_beep = float(r["t_sec"])
         i_beep = idx(t_beep); i0b = idx(t_beep-BASELINE_PRE_S); i1s = idx(t_beep+SEARCH_WINDOW_S)
         if i_beep <= 0 or i1s <= i_beep or i0b >= i_beep:
             continue
         beeps_in_range += 1
 
-        # pick pitch mode
+        # thresholds by axis/mode
         if "micro" in mv:
             need_pitch = ("pitch_micro", DTHETA_IN["pitch_micro"], THETA_HOLD["pitch_micro"])
         elif "fast" in mv:
@@ -306,36 +297,54 @@ def infer_events_for_session(imu_csv: str, schedule_csv: str, out_csv: str,
         max_pitch = float(np.max(np.abs(pitch_s[i_beep:i1s] - np.mean(pitch_s[max(0,i0b):i_beep])))) if i1s>i_beep and i_beep>i0b else 0.0
         max_roll  = float(np.max(np.abs(roll_s[i_beep:i1s]  - np.mean(roll_s[max(0,i0b):i_beep]))))  if i1s>i_beep and i_beep>i0b else 0.0
 
-        # produce events: detected or fallback
         axis_chosen = cand.get("axis", "none")
+        used_fallback = False
+
         if cand["found"] and cand["onset_idx"] is not None:
+            # ---- Detected onset ----
             i_on = cand["onset_idx"]
-            conf = float((gyromag[i_on]-cand["base_gm"]) / (cand["std_gm"] if cand["std_gm"]>1e-6 else 1.0))
+            conf_on = float((gyromag[i_on]-cand["base_gm"]) / (cand["std_gm"] if cand["std_gm"]>1e-6 else 1.0))
+
             if ev == "BEEP_SLOUCH":
-                out_rows.append([t[i_on], "SLOUCH_START", mv, conf])
+                out_rows.append([t[i_on], "SLOUCH_START", mv, conf_on])
+                # hold: detected or fallback aligned to onset spacing
                 if cand["hold_idx"] is not None:
-                    out_rows.append([t[cand["hold_idx"]], "SLOUCHED_HOLD_START", mv, float(cand["dtheta"])])
-                    holds += 1
+                    hold_time = t[cand["hold_idx"]]; hold_conf = float(cand["dtheta"])
+                    holds_detected += 1
+                else:
+                    d_on, d_hold = FALLBACK_OFFSETS.get(mv, (0.45, 0.90))
+                    hold_time = t[i_on] + (d_hold - d_on); hold_conf = 0.0
+                    used_fallback = True
+                out_rows.append([hold_time, "SLOUCHED_HOLD_START", mv, hold_conf])
+                holds_total += 1
+
             else:  # RECOVER
-                out_rows.append([t[i_on], "RECOVERY_START", mv, conf])
+                out_rows.append([t[i_on], "RECOVERY_START", mv, conf_on])
                 if cand["hold_idx"] is not None:
-                    out_rows.append([t[cand["hold_idx"]], "UPRIGHT_HOLD_START", mv, float(UPRIGHT_NEAR_DEG)])
-                    holds += 1
+                    hold_time = t[cand["hold_idx"]]; hold_conf = float(UPRIGHT_NEAR_DEG)
+                    holds_detected += 1
+                else:
+                    d_on, d_hold = FALLBACK_OFFSETS.get(mv, (0.45, 0.90))
+                    hold_time = t[i_on] + (d_hold - d_on); hold_conf = 0.0
+                    used_fallback = True
+                out_rows.append([hold_time, "UPRIGHT_HOLD_START", mv, hold_conf])
+                holds_total += 1
 
             if WRITE_DEBUG:
-                dbg_rows.append([t_beep, ev, mv, axis_chosen,
-                                 t[i_on], (t[cand["hold_idx"]] if cand["hold_idx"] is not None else np.nan),
-                                 float(cand["onset_score"]), float(cand["dtheta"]), max_pitch, max_roll])
+                dbg_rows.append([t_beep, ev, mv,
+                                 (axis_chosen + ("+hold_fallback" if used_fallback else "")),
+                                 t[i_on], hold_time, float(cand["onset_score"]), float(cand["dtheta"]), max_pitch, max_roll])
+
         else:
-            # ---- Fallback: synthesize conservative labels from beep ----
+            # ---- Fallback: synthesize both events from beep ----
             d_on, d_hold = FALLBACK_OFFSETS.get(mv, (0.45, 0.90))
             if ev == "BEEP_SLOUCH":
-                out_rows.append([t_beep + d_on,  "SLOUCH_START",        mv, 0.0])
-                out_rows.append([t_beep + d_hold, "SLOUCHED_HOLD_START", mv, 0.0])
+                out_rows.append([t_beep + d_on,   "SLOUCH_START",         mv, 0.0])
+                out_rows.append([t_beep + d_hold, "SLOUCHED_HOLD_START",  mv, 0.0])
             else:
-                out_rows.append([t_beep + d_on,  "RECOVERY_START",      mv, 0.0])
-                out_rows.append([t_beep + d_hold, "UPRIGHT_HOLD_START",  mv, 0.0])
-
+                out_rows.append([t_beep + d_on,   "RECOVERY_START",       mv, 0.0])
+                out_rows.append([t_beep + d_hold, "UPRIGHT_HOLD_START",   mv, 0.0])
+            holds_total += 1
             if WRITE_DEBUG:
                 dbg_rows.append([t_beep, ev, mv, "fallback",
                                  np.nan, np.nan, 0.0, 0.0, max_pitch, max_roll])
@@ -349,16 +358,20 @@ def infer_events_for_session(imu_csv: str, schedule_csv: str, out_csv: str,
 
     if WRITE_DEBUG:
         with open(debug_csv, "w", newline="") as f:
-            w = csv.writer(f); w.writerow(["t_beep","event","type","axis_chosen","onset_time","hold_time","onset_score","dtheta","max_pitch","max_roll"])
+            w = csv.writer(f); w.writerow(
+                ["t_beep","event","type","axis_chosen","onset_time","hold_time","onset_score","dtheta","max_pitch","max_roll"]
+            )
             for row in dbg_rows:
                 w.writerow(row)
 
     return {
-        "events": len(out_rows), "holds": holds,
-        "beeps_in_range": beeps_in_range, "beeps_total": beeps_pos_total,
+        "events": len(out_rows),
+        "holds_total": holds_total,
+        "holds_detected": holds_detected,
+        "beeps_in_range": beeps_in_range,
+        "beeps_total": beeps_pos_total,
         "shift": shift
     }
-
 
 # ---------- IMU selection ----------
 def looks_like_non_imu(name: str) -> bool:
@@ -387,10 +400,9 @@ def choose_imu_for_folder(part_dir: Path, imu_dir: Path) -> Optional[Path]:
     global_imus = sorted(list_valid_imus(imu_dir), key=lambda p: p.stat().st_mtime, reverse=True)
     return global_imus[0] if global_imus else None
 
-
 # ---------- Batch driver ----------
 def main():
-    ap = argparse.ArgumentParser(description="Batch infer events for beep_schedules_* folders (axis-adaptive, 2-pass, with fallback).")
+    ap = argparse.ArgumentParser(description="Batch infer events for beep_schedules_* folders (axis-adaptive, 2-pass, guaranteed 2 events per positive beep).")
     ap.add_argument("--imu-dir", type=str, default="slouch_data", help="Fallback IMU CSV dir if none inside participant folder.")
     ap.add_argument("--participants", type=str, default=None, help="Comma list (e.g., Ivan0,Claire1). If omitted, scans all beep_schedules_* folders.")
     ap.add_argument("--verbose", action="store_true")
@@ -429,13 +441,13 @@ def main():
 
         print(f"[run] {part}  IMU={Path(imu_csv).name}  SCHED={Path(schedule_csv).name}  -> {Path(out_csv).name}")
         stats = infer_events_for_session(imu_csv, schedule_csv, out_csv, debug_csv, verbose=args.verbose)
-        summary.append((part, stats["events"], stats["holds"], stats["beeps_in_range"], stats["beeps_total"], stats["shift"]))
-        print(f"[ok ] {part}: events={stats['events']} holds={stats['holds']} beeps_in_range={stats['beeps_in_range']}/{stats['beeps_total']} shift={stats['shift']:.3f}")
+        summary.append((part, stats["events"], stats["holds_total"], stats["holds_detected"], stats["beeps_in_range"], stats["beeps_total"], stats["shift"]))
+        print(f"[ok ] {part}: events={stats['events']} holds_total={stats['holds_total']} holds_detected={stats['holds_detected']} beeps_in_range={stats['beeps_in_range']}/{stats['beeps_total']} shift={stats['shift']:.3f}")
 
     if summary:
         print("\n=== Summary ===")
-        for part, ev, h, bir, bt, sh in summary:
-            print(f"{part:>12}: events={ev:4d} holds={h:3d} beeps_in_range={bir:2d}/{bt:2d} shift={sh:7.3f}")
+        for part, ev, htot, hdet, bir, bt, sh in summary:
+            print(f"{part:>12}: events={ev:4d} holds_total={htot:3d} holds_detected={hdet:3d} beeps_in_range={bir:2d}/{bt:2d} shift={sh:7.3f}")
     else:
         print("[warn] No sessions processed.]")
 

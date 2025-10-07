@@ -9,8 +9,8 @@ FEATURE_ORDER = [
 #               1. schedule.csv, beep sound (mav file), 
 #               2. beep sound (mav file), 
 #               3. empty csv (to be filled by detector)
-'''
-python generate_beep_schedule_5m15s.py --participant Ivan0 \
+''' (jitter is probabilistic)
+python generate_beep_schedule_5m15s.py --participant Ivan1 \
   --minutes 5 --cycle-len 15 --jitter 1.0 --initial-delay 2.0 --make-wav \
   --movements "normal_slouch,fast_slouch,micro_slouch,lateral_left,lateral_right,neck_only,reach_left,reach_right" \
   --complete-plan

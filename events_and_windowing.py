@@ -13,10 +13,10 @@ stride = 0.5
 m = 0.2  # margin around starts treated as transition
 
 len_rec = t1 - t0  # duration in seconds of recording
-total_amount_windows = int(np.floor((len_rec - len_window) / stride) + 1)
-total_amount_windows = max(total_amount_windows, 0)                      # should be 718 for 6 min
+windows_per_rec = int(np.floor((len_rec - len_window) / stride) + 1)
+windows_per_rec = max(windows_per_rec, 0)                      # should be 718 for 6 min
 
-labels_array = np.zeros((total_amount_windows, 1), dtype=int)  # 0=upright,1=transition,2=slouched
+labels_array = np.zeros((windows_per_rec, 1), dtype=int)  # 0=upright,1=transition,2=slouched
 
 # sort events and ensure we have an initial upright at t0
 events = df_event[['t_sec','event']].sort_values('t_sec').to_numpy().tolist()
@@ -67,11 +67,20 @@ def label_at_time(t):
     return 0
 
 # label comes from the state at the end of the window (causal)
-for i in range(total_amount_windows):
+for i in range(windows_per_rec):
     current_time = t0 + len_window + i * stride
     labels_array[i, 0] = label_at_time(current_time)
 
+## --------------------------------------------------------------------------------------------------
+# Now create actual windows
 
+rec_tot = 1             # und windows_per_rec = 718
+total_amount_windows = rec_tot * windows_per_rec
+X_tot = np.zeros((total_amount_windows, 75, 14)) 
+
+#for i in range(total_amount_windows):
+
+#    X_tot[i, :, :] = 
 
 
 

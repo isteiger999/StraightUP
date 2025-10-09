@@ -18,10 +18,18 @@ python generate_beep_schedule_5m15s.py --participant Ivan3 \
 
 '''
 # individually
-python batch_infer_events.py --participants Ivan0 --verbose
+python batch_infer_events.py --participants Ivan3 --verbose
 '''
 
 '''
 # Everyone
 python batch_infer_events.py --verbose
+'''
+
+
+'''
+Vom Laptop/Mac git pullen (nicht bloss git pull):
+git fetch origin
+git reset --hard "HEAD@{upstream}"   
+git clean -fd
 '''

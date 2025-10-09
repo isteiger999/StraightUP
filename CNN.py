@@ -3,7 +3,7 @@ from tensorflow.keras import layers, models, regularizers
 import coremltools as ct
 import numpy as np
 
-def CNN_model(X_train, X_test, y_train, y_test):
+def CNN_model(X_train, y_train):
 
     # Regularization for weights inside filters
     l2 = regularizers.l2(1e-4)
@@ -14,7 +14,7 @@ def CNN_model(X_train, X_test, y_train, y_test):
     
     # The new input shape is (400, 14)
     cnn = models.Sequential([
-        layers.Input(shape=(400, 14)),
+        layers.Input(shape=(75, 13)),
         norm,
         layers.Conv1D(filters=32, kernel_size=11, padding="same", activation="relu", kernel_regularizer=l2),
         layers.MaxPooling1D(2),

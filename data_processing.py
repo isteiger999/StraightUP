@@ -82,6 +82,23 @@ def drop_timestamp_inplace(folders):
             else:
                 pass
 
+def count_labels(y, labels=(0, 1, 2), verbose=True):
+    y = np.asarray(y).ravel().astype(int)
+    total = y.size
+    counts = {lbl: 0 for lbl in labels}
+    vals, cnts = np.unique(y, return_counts=True)
+    for v, c in zip(vals, cnts):
+        if v in counts:
+            counts[v] = int(c)
+
+    if verbose:
+        for lbl in labels:
+            n = counts[lbl]
+            pct = (n / total * 100) if total else 0.0
+            print(f"label {lbl}: {n} ({pct:.1f}%)")
+        print(f"total: {total}")
+    return counts
+
 def obtain_windows():
     f_sample = 50      # [Hz].  (actually 50.07 Hz) 180sekunden --> 12.6 frames = 0.252s
     window_length = 8  # [sec]

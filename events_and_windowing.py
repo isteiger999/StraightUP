@@ -36,7 +36,7 @@ def folders_tot(type):
     
     return all_matching_folders, num_beep_schedules_folders
 
-def find_shapes(df_imu):
+def find_shapes():
     # use first IMU recording for shape definition of X_tot and y_tot
     df_imu = pd.read_csv(r"beep_schedules_Ivan0/airpods_motion_1759863949.csv")
     t = df_imu.iloc[:, 0].astype(float).to_numpy()
@@ -99,87 +99,157 @@ def label_at_time(t, names, times, m):
     # default fallback
     return 0
 
+def count_labels(y, labels=(0, 1, 2), verbose=True):
+    y = np.asarray(y).ravel().astype(int)
+    total = y.size
+    counts = {lbl: 0 for lbl in labels}
+    vals, cnts = np.unique(y, return_counts=True)
+    for v, c in zip(vals, cnts):
+        if v in counts:
+            counts[v] = int(c)
+
+    if verbose:
+        for lbl in labels:
+            n = counts[lbl]
+            pct = (n / total * 100) if total else 0.0
+            print(f"label {lbl}: {n} ({pct:.1f}%)")
+        print(f"total: {total}")
+    return counts
+
+def drop_timestamp_inplace_from_files(imu_files):
+    """
+    imu_files: list of file paths (e.g., from glob.glob)
+    Removes 'timestamp' column if present and overwrites each CSV.
+    """
+    updated = 0
+    for csv_path in imu_files:
+        try:
+            df = pd.read_csv(csv_path, low_memory=False)
+        except Exception as e:
+            print(f"Skipping {csv_path}: read error: {e}")
+            continue
+
+        if "timestamp" in df.columns:
+            df.drop(columns=["timestamp"], inplace=True)
+            df.to_csv(csv_path, index=False)
+            updated += 1
+
+def add_pitch_in_memory(df_imu, out_col="pitch_rad",
+                        quat_cols=("quat_x","quat_y","quat_z","quat_w")):
+    """
+    Compute pitch (radians) from quaternions and INSERT it into df_imu in place.
+    Column is placed after 'grav_z' if present, else after 'quat_w', else at end.
+    Does not write to disk. Returns df_imu for convenience.
+    """
+    # Ensure quaternion columns exist
+    missing = [c for c in quat_cols if c not in df_imu.columns]
+    if missing:
+        # quietly do nothing if quats missing
+        return df_imu
+
+    # Vectorized pitch computation (Tait–Bryan, pitch about Y)
+    x = df_imu[quat_cols[0]].to_numpy(dtype=np.float64, copy=False)
+    y = df_imu[quat_cols[1]].to_numpy(dtype=np.float64, copy=False)
+    z = df_imu[quat_cols[2]].to_numpy(dtype=np.float64, copy=False)
+    w = df_imu[quat_cols[3]].to_numpy(dtype=np.float64, copy=False)
+
+    sinp = 2.0 * (w * y - z * x)
+    sinp = np.clip(sinp, -1.0, 1.0)
+    pitch = np.arcsin(sinp)  # radians
+
+    # If column already exists, drop it so we can control its position
+    if out_col in df_imu.columns:
+        df_imu.drop(columns=[out_col], inplace=True)
+
+    cols = list(df_imu.columns)
+    if "grav_z" in cols:
+        insert_at = cols.index("grav_z") + 1
+    elif "quat_w" in cols:
+        insert_at = cols.index("quat_w") + 1
+    else:
+        insert_at = len(cols)
+
+    # Insert in place
+    df_imu.insert(insert_at, out_col, pitch)
+    return df_imu
+
 
 def X_and_y(type):
-    matching_folders, num_beep_schedules_folders = folders_tot(type) ###
-    df_imu0 = pd.read_csv(r"beep_schedules_Ivan0/airpods_motion_1759863949.csv")
-    t, dt_med, fs, win_len_frames, stride_frames, n_ch, N, windows_per_rec, stride, len_window_sec = find_shapes(df_imu0)
+    matching_folders, num_beep_schedules_folders = folders_tot(type)
+    df_imu0 = pd.read_csv(r"beep_schedules_Ivan0/airpods_motion_1759863949.csv")  # (see note below)
+    t, dt_med, fs, win_len_frames, stride_frames, n_ch, N, windows_per_rec, stride, len_window_sec = find_shapes()
     X_tot = np.zeros((num_beep_schedules_folders*windows_per_rec, win_len_frames, n_ch), dtype=np.float32)
     y_tot = np.zeros((num_beep_schedules_folders*windows_per_rec, 1), dtype=int)
-    #print("hihi")
-    #print(y_tot.shape)
+
     for index, folder_path in enumerate(matching_folders):
-        if os.path.isdir(folder_path):
+        if not os.path.isdir(folder_path):
+            continue
 
-            event_pattern = os.path.join(folder_path, 'events_inferred_template_*.csv')
-            event_files = glob.glob(event_pattern)
+        event_files = glob.glob(os.path.join(folder_path, 'events_inferred_template_*.csv'))
+        imu_files   = glob.glob(os.path.join(folder_path, 'airpods_motion_*.csv'))
+        if not event_files or not imu_files:
+            print(f"⚠️ Missing files in {folder_path}")
+            continue
 
-            imu_pattern = os.path.join(folder_path, 'airpods_motion_*.csv')
-            imu_files = glob.glob(imu_pattern)
+        df_event = pd.read_csv(event_files[0])
+        df_imu   = pd.read_csv(imu_files[0])
 
-            if event_files:
-                event_file_path = event_files[0]
-                df_event = pd.read_csv(event_file_path)
-            else:
-                print("⚠️ Event file not found in this folder.")
-                continue  
+        # Add pitch (in place)
+        add_pitch_in_memory(df_imu)
 
-            if imu_files:
-                imu_file_path = imu_files[0]
-                df_imu = pd.read_csv(imu_file_path)
-            else:
-                print("  ⚠️ IMU file not found in this folder.")
-                continue  
+        # --- Align event times to IMU time axis ---
+        t_imu = df_imu.iloc[:, 0].astype(float).to_numpy()
+        t0 = float(t_imu[0])
 
-            # assume first column in IMU is time (t_sec). If not, rename accordingly.
-            t0 = float(df_imu.iloc[0, 0])
-            t1 = float(df_imu.iloc[-1, 0])
+        ev = df_event[['t_sec','event']].copy()
+        ev = ev.sort_values('t_sec').reset_index(drop=True)
 
-            m = 0.2  # margin around starts treated as transition
+        # shift events so their first timestamp maps to IMU t0
+        ev['t_aligned'] = ev['t_sec'].astype(float) - float(ev['t_sec'].iloc[0]) + t0
 
-            labels_array = np.zeros((windows_per_rec, 1), dtype=int)  # 0=upright,1=transition,2=slouched
-            #print("haha")
-            #print(labels_array.shape)
-            # sort events and ensure we have an initial upright at t0
-            events = df_event[['t_sec','event']].sort_values('t_sec').to_numpy().tolist()
-            if not events or events[0][1] != 'UPRIGHT_HOLD_START':
-                events = [[t0, 'UPRIGHT_HOLD_START']] + events
-            times = np.array([float(t) for t, _ in events])
-            names = [e for _, e in events]
+        # ensure initial upright AT t0, then keep list sorted by aligned time
+        if ev.iloc[0]['event'] != 'UPRIGHT_HOLD_START':
+            ev = pd.concat([
+                pd.DataFrame({'t_sec':[ev['t_sec'].iloc[0]], 'event':['UPRIGHT_HOLD_START'], 't_aligned':[t0]}),
+                ev
+            ], ignore_index=True)
 
-            # label comes from the state at the end of the window (causal)
-            for i in range(windows_per_rec):
-                current_time = t0 + len_window_sec + i * stride
-                labels_array[i, 0] = label_at_time(current_time, names, times, m)
+        ev = ev.sort_values('t_aligned', kind='mergesort').reset_index(drop=True)
 
-            y_tot[index*windows_per_rec:(index+1)*windows_per_rec, 0:1] = labels_array
+        times = ev['t_aligned'].to_numpy()
+        names = ev['event'].astype(str).tolist()
 
-            ## --------------------------------------------------------------------------------------------------
-            # Now create actual windows
-            # Random left-crop (0..stride_frames-1) then mirror-pad on the left
-            max_crop = max(0, min(stride_frames - 1, win_len_frames - 1))
-            Xsig = df_imu.iloc[:, 1:].to_numpy()    # remove time column
+        # --- Labels: state at window END on IMU axis ---
+        m = 0.2
+        labels_array = np.zeros((windows_per_rec, 1), dtype=int)
+        for i in range(windows_per_rec):
+            current_time = t0 + len_window_sec + i * stride
+            labels_array[i, 0] = label_at_time(current_time, names, times, m)
+        y_tot[index*windows_per_rec:(index+1)*windows_per_rec, 0:1] = labels_array
 
-            base = index * windows_per_rec
-            for i in range(windows_per_rec):
-                start = i * stride_frames
-                end = start + win_len_frames
-                win = Xsig[start:end, :]        
+        # --- Features: drop the time column by position (your current approach) ---
+        Xsig = df_imu.iloc[:, 1:].to_numpy(dtype=np.float32, copy=False)
 
-                # If we’re a few samples short at the very end, pad by repeating the last row
-                if win.shape[0] < win_len_frames:
-                    need = win_len_frames - win.shape[0]
-                    pad_tail = np.repeat(win[-1:, :], need, axis=0)
-                    win = np.concatenate([win, pad_tail], axis=0)
+        # --- Windowing ---
+        base = index * windows_per_rec
+        max_crop = max(0, min(stride_frames - 1, win_len_frames - 1))
+        for i in range(windows_per_rec):
+            start = i * stride_frames
+            end = start + win_len_frames
+            win = Xsig[start:end, :]
 
-                # Random crop amount (can be 0)
-                r = random.randint(0, max_crop) if max_crop > 0 else 0
-                if r > 0:
-                    left = win[:r, :]                     # the part we "remove"
-                    left_mirror = np.flip(left, axis=0)   # mirror it
-                    win = np.concatenate([left_mirror, win[r:, :]], axis=0)  # pad-left + keep rest
+            if win.shape[0] < win_len_frames:
+                need = win_len_frames - win.shape[0]
+                pad_tail = np.repeat(win[-1:, :], need, axis=0)
+                win = np.concatenate([win, pad_tail], axis=0)
 
-                X_tot[base + i, :, :] = win
+            r = random.randint(0, max_crop) if max_crop > 0 else 0
+            if r > 0:
+                left = win[:r, :]
+                left_mirror = np.flip(left, axis=0)
+                win = np.concatenate([left_mirror, win[r:, :]], axis=0)
+
+            X_tot[base + i, :, :] = win
 
     return X_tot, y_tot
 

@@ -1,67 +1,76 @@
 import tensorflow as tf
 from tensorflow.keras import layers, models, regularizers
+from sklearn.utils.class_weight import compute_class_weight
 import coremltools as ct
 import numpy as np
 
-def CNN_model(X_train, y_train, X_val, y_val):
-    
+def CNN_model(X_train, y_train, X_val, y_val, n_classes=3):
     assert X_train.ndim == 3 and X_train.shape[1:] == (75, 13)
-    assert X_val.shape[1:] == (75, 13)
-    y_train = y_train.astype("float32")
-    y_val   = y_val.astype("float32")
+    assert X_val.shape[1:]   == (75, 13)
 
-    # Regularization for weights inside filters
+    # labels should be integer class IDs: 0,1,2
+    y_train = y_train.squeeze().astype("int32")
+    y_val   = y_val.squeeze().astype("int32")
+
     l2 = regularizers.l2(1e-4)
 
-    # Adding Normalization layer into CNN and train it on RAW X_train (yes X_train itself is not normalized)
+    # Per-feature normalization (fit on train only)
     norm = layers.Normalization(axis=-1)
-    norm.adapt(X_train.astype("float32"))  # TRAIN ONLY
-    
-    # The new input shape is (400, 14)
+    norm.adapt(X_train.astype("float32"))
+
     cnn = models.Sequential([
         layers.Input(shape=(75, 13)),
         norm,
-        layers.Conv1D(filters=32, kernel_size=11, padding="same", activation="relu", kernel_regularizer=l2),
+        layers.Conv1D(32, 11, padding="same", activation="relu", kernel_regularizer=l2),
         layers.MaxPooling1D(2),
 
-        layers.Conv1D(64, 9, padding="same", activation="relu", kernel_regularizer=l2),
+        layers.Conv1D(64, 9,  padding="same", activation="relu", kernel_regularizer=l2),
         layers.MaxPooling1D(2),
 
-        layers.Conv1D(96, 7, padding="same", activation="relu", kernel_regularizer=l2),
+        layers.Conv1D(96, 7,  padding="same", activation="relu", kernel_regularizer=l2),
         layers.MaxPooling1D(2),
 
         layers.GlobalAveragePooling1D(),
-        layers.Dropout(0.30),                   # means random 30% of neurons get deactivated
+        layers.Dropout(0.30),
         layers.Dense(64, activation="relu", kernel_regularizer=l2),
         layers.Dropout(0.20),
-        layers.Dense(1, activation="sigmoid")   # predicts P(class=1) (thats why output only 1D)
+        layers.Dense(n_classes, activation="softmax")   # 3 logits -> probs
     ])
 
     cnn.compile(
         optimizer=tf.keras.optimizers.Adam(1e-3),
-        loss="binary_crossentropy",
-        metrics=["accuracy",
-                tf.keras.metrics.AUC(name="roc_auc"),
-                tf.keras.metrics.AUC(curve="PR", name="pr_auc")]
+        loss="sparse_categorical_crossentropy",
+        metrics=["accuracy"]   # add Precision/Recall if you like
     )
 
-    ## find optimal amount of epochs with 'patience'          
     callbacks = [
-        tf.keras.callbacks.EarlyStopping(monitor="val_pr_auc", mode="max",
-                                        patience=15, restore_best_weights=True), # patience 10: means even though validation error might not decrease anymore, we still go 10 epochs further to check if it really increases or just local minimum
-        tf.keras.callbacks.ReduceLROnPlateau(monitor="val_pr_auc", mode="max",
-                                            factor=0.5, patience=3)              # multiplies learning rate by 0.5 if after 3 epochs validation error does not decrease 
+        tf.keras.callbacks.EarlyStopping(
+            monitor="val_loss", patience=15, restore_best_weights=True
+        ),
+        tf.keras.callbacks.ReduceLROnPlateau(
+            monitor="val_loss", factor=0.5, patience=3
+        ),
     ]
+
+    # For class imbalances (we have much more 0 than 1 and 2)
+    present = np.unique(y_train.ravel())
+    valid = np.array([c for c in [0,1,2] if c in present])
+    class_weight = None
+    if valid.size:
+        cw = compute_class_weight('balanced', classes=valid, y=y_train.ravel())
+        class_weight = {int(c): float(w) for c, w in zip(valid, cw)}
 
     cnn.fit(
         X_train, y_train,
-        validation_data=(X_val, y_val),   # << no overlap if your split is clean
+        validation_data=(X_val, y_val),
         epochs=200,
         batch_size=32,
         shuffle=True,
-        callbacks=callbacks
+        callbacks=callbacks,
+        verbose=1,
+        class_weight=class_weight
     )
-    
+
     return cnn
 
 

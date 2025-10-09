@@ -31,7 +31,7 @@ python generate_beep_schedule_5m15s.py `
 
 '''
 # individually
-python batch_infer_events.py --participants Ivan3 --verbose
+python batch_infer_events.py --participants David0 --verbose
 '''
 
 '''

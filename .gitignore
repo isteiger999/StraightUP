@@ -37,7 +37,7 @@ logs/
 checkpoints/
 *.npz
 *.npy
-*.csv
+# *.csv
 *.h5
 *.hdf5
 

@@ -17,16 +17,12 @@ def main():
     print(X_test.shape, y_test.shape)
 
     #count_all_zero_windows(X_test)
-    '''
-    cnn = CNN_model(X_train, X_test, y_train, y_test)
-    print(f"X_tot shape: {X_tot.shape}; y_tot shape: {y_tot.shape}")
-    print(f"X_train shape: {X_train.shape}; y_train shape: {y_train.shape}")
-    print(f"X_test shape: {X_test.shape}; y_test shape: {y_test.shape}")
+    
+    cnn = CNN_model(X_train, y_train, X_val, y_val)
     print("Eval Score:")
     cnn.evaluate(X_test, y_test)
     print("Done evaluating")
-    export_coreml(cnn)
-    '''
+    # export_coreml(cnn)
 
 if __name__ == '__main__':
     main()

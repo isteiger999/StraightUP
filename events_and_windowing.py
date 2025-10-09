@@ -181,6 +181,14 @@ def X_and_y(type):
 
                 X_tot[base + i, :, :] = win
 
+    row, col = y_tot.shape
+    count = 0
+    for i in range(row):
+        if y_tot[i,0:1] == 2:
+            count += 1
+
+    print(count)
+
     return X_tot, y_tot
 
 

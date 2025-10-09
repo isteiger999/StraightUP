@@ -3,7 +3,12 @@ from tensorflow.keras import layers, models, regularizers
 import coremltools as ct
 import numpy as np
 
-def CNN_model(X_train, y_train):
+def CNN_model(X_train, y_train, X_val, y_val):
+    
+    assert X_train.ndim == 3 and X_train.shape[1:] == (75, 13)
+    assert X_val.shape[1:] == (75, 13)
+    y_train = y_train.astype("float32")
+    y_val   = y_val.astype("float32")
 
     # Regularization for weights inside filters
     l2 = regularizers.l2(1e-4)
@@ -33,7 +38,7 @@ def CNN_model(X_train, y_train):
     ])
 
     cnn.compile(
-        optimizer=tf.keras.optimizers.legacy.Adam(1e-3),
+        optimizer=tf.keras.optimizers.Adam(1e-3),
         loss="binary_crossentropy",
         metrics=["accuracy",
                 tf.keras.metrics.AUC(name="roc_auc"),
@@ -43,17 +48,17 @@ def CNN_model(X_train, y_train):
     ## find optimal amount of epochs with 'patience'          
     callbacks = [
         tf.keras.callbacks.EarlyStopping(monitor="val_pr_auc", mode="max",
-                                        patience=10, restore_best_weights=True), # patience 10: means even though validation error might not decrease anymore, we still go 10 epochs further to check if it really increases or just local minimum
+                                        patience=15, restore_best_weights=True), # patience 10: means even though validation error might not decrease anymore, we still go 10 epochs further to check if it really increases or just local minimum
         tf.keras.callbacks.ReduceLROnPlateau(monitor="val_pr_auc", mode="max",
                                             factor=0.5, patience=3)              # multiplies learning rate by 0.5 if after 3 epochs validation error does not decrease 
     ]
 
     cnn.fit(
         X_train, y_train,
-        validation_split=0.2,      # or validation_data=(X_val, y_val)
-        epochs=200,                # goes maximally up to 200 epochs
+        validation_data=(X_val, y_val),   # << no overlap if your split is clean
+        epochs=200,
         batch_size=32,
-        shuffle=True,              # Keras shuffles each epoch for arrays by default
+        shuffle=True,
         callbacks=callbacks
     )
     

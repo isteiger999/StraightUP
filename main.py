@@ -13,7 +13,7 @@ def main():
     print(count_labels(y_train))
     print(X_train.shape, y_train.shape)
     X_val, y_val = X_and_y('val')
-    #X_test, y_test = X_and_y('test')
+    X_test, y_test = X_and_y('test')
     #print(X_test.shape, y_test.shape)
 
     #count_all_zero_windows(X_test)

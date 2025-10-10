@@ -17,18 +17,18 @@ def main():
     print(count_labels(y_val))
     X_test, y_test = X_and_y('test')
     print(count_labels(y_test))
-    
+
     verify_lengths()
     #count_all_zero_windows(X_test)
 
-    '''
+    
     # 3. Create & train CNN --> then evaluate
     cnn = CNN_model(X_train, y_train, X_val, y_val)
     print("Eval Score:")
     cnn.evaluate(X_test, y_test)
     print("Done evaluating")
     # export_coreml(cnn)
-    '''
+    
 
 if __name__ == '__main__':
     main()

@@ -234,6 +234,46 @@ def verify_lengths(root="data"):
     else:
         print("All IMU CSVs have exactly 18,000 rows.")
 
+def normalize_chanels(df_imu: pd.DataFrame, time_col_idx: int = 0, stats: dict = None, eps: float = 1e-8) -> None:
+    """
+    In-place column-wise z-score normalization for all channels except the time column.
+      - If `stats` is None: compute mean/std from this df and apply (per-channel).
+      - If `stats` is provided: use `stats['mean']` and `stats['std']` for the listed columns.
+    Mutates df_imu and returns None.
+
+    `stats` format (optional):
+      {'mean': {col: float, ...}, 'std': {col: float, ...}}
+    """
+    if not isinstance(df_imu, pd.DataFrame):
+        raise TypeError("normalize_chanels expects a pandas DataFrame")
+
+    cols = list(df_imu.columns)
+    if not (0 <= time_col_idx < len(cols)):
+        raise IndexError("time_col_idx out of range")
+
+    # features = all columns except the time column
+    feat_cols = [c for i, c in enumerate(cols) if i != time_col_idx]
+
+    # to numeric (safe), ignore NaNs in stats
+    X = df_imu[feat_cols].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=np.float64, copy=True)
+
+    if stats is None:
+        mean = np.nanmean(X, axis=0)
+        std  = np.nanstd(X,  axis=0)
+    else:
+        # Use provided stats in the exact feat_cols order; fallback to per-file stats if missing
+        mean = np.array([stats['mean'].get(c, np.nanmean(X[:, j])) for j, c in enumerate(feat_cols)], dtype=np.float64)
+        std  = np.array([stats['std' ].get(c, np.nanstd( X[:, j])) for j, c in enumerate(feat_cols)], dtype=np.float64)
+
+    # guard std
+    bad = ~np.isfinite(std) | (std < eps)
+    std[bad] = 1.0
+
+    # normalize and write back (float32 is fine for ML)
+    Xn = (X - mean) / std
+    df_imu.loc[:, feat_cols] = Xn.astype(np.float32)
+    # (timestamp column left untouched)
+
 def edit_csv():
     """
     Walk data/beep_schedules_*/, open each airpods_motion_*.csv,
@@ -264,6 +304,7 @@ def edit_csv():
             # --- add/refresh derived columns (idempotent) ---
             add_pitch_to_df(df_imu)  # modifies df_imu in place
             fix_length(df_imu, target_len=18_000)
+            normalize_chanels(df_imu)
 
             try:
                 df_imu.to_csv(csv_path, index=False)

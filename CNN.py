@@ -5,8 +5,9 @@ import coremltools as ct
 import numpy as np
 
 def CNN_model(X_train, y_train, X_val, y_val, n_classes=3):
-    assert X_train.ndim == 3 and X_train.shape[1:] == (75, 13)
-    assert X_val.shape[1:]   == (75, 13)
+    n_ch = 14
+    assert X_train.ndim == 3 and X_train.shape[1:] == (75, n_ch)
+    assert X_val.shape[1:]   == (75, n_ch)
 
     # labels should be integer class IDs: 0,1,2
     y_train = y_train.squeeze().astype("int32")
@@ -19,7 +20,7 @@ def CNN_model(X_train, y_train, X_val, y_val, n_classes=3):
     norm.adapt(X_train.astype("float32"))
 
     cnn = models.Sequential([
-        layers.Input(shape=(75, 13)),
+        layers.Input(shape=(75, n_ch)),
         norm,
         layers.Conv1D(32, 11, padding="same", activation="relu", kernel_regularizer=l2),
         layers.MaxPooling1D(2),

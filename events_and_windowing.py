@@ -4,6 +4,7 @@ import random
 import glob
 import os
 
+
 # count number of beep_schedules_folders:
 def folders_tot(type):
     if type == 'train':
@@ -21,7 +22,8 @@ def folders_tot(type):
     for ending in endings:
         # Build the pattern using an f-string to insert the current ending
         # Example: 'beep_schedules_*0'
-        pattern = os.path.join(os.getcwd(), f'beep_schedules_*{ending}')
+        DATA_ROOT = os.path.join(os.getcwd(), "data")
+        pattern = os.path.join(DATA_ROOT, f'beep_schedules_*{ending}')
         
         # Find all paths matching the specific pattern
         current_matches = glob.glob(pattern)
@@ -36,27 +38,19 @@ def folders_tot(type):
     
     return all_matching_folders, num_beep_schedules_folders
 
-def find_shapes():
-    # use first IMU recording for shape definition of X_tot and y_tot
-    df_imu = pd.read_csv(r"beep_schedules_Ivan0/airpods_motion_1759863949.csv")
-    t = df_imu.iloc[:, 0].astype(float).to_numpy()
-    dt_med = float(np.median(np.diff(t)))
-    fs = (1.0 / dt_med) if dt_med > 0 else 50.0
-    a = 1.5
-    stride = 0.5
-    len_window_sec = 1.5
-
-    win_len_frames = int(round(len_window_sec * fs))      # samples per window
-    stride_frames = int(round(stride * fs))    # samples per stride
-
-    Xsig = df_imu.iloc[:, 1:].to_numpy()        # exclude time colum
-    n_ch = Xsig.shape[1]                        # nr. of chanels 
-
-    # Recompute windows_per_rec from sample counts (more robust than using seconds)
-    N = Xsig.shape[0]                           # 18'000
-    windows_per_rec = max(0, 1 + (N - win_len_frames) // stride_frames)
-
-    return t, dt_med, fs, win_len_frames, stride_frames, n_ch, N, windows_per_rec, stride, len_window_sec
+def count_all_zero_windows(X):
+    """
+    X: np.ndarray of shape (N, 400, 14)
+    Prints how many windows X[s, :, :] are entirely zeros.
+    Returns (count, indices_array).
+    """
+    zero_mask = np.all(X == 0, axis=(1, 2))  # True where whole window is zeros
+    count = int(zero_mask.sum())
+    idxs = np.flatnonzero(zero_mask)
+    print(f"{count} all-zero windows out of {X.shape[0]}")
+    if count:
+        print("indices:", idxs.tolist())
+    return count, idxs
 
 def label_at_time(t, names, times, m):
     """Return 0=upright, 1=transition, 2=slouched at time t, with margin m."""
@@ -116,24 +110,6 @@ def count_labels(y, labels=(0, 1, 2), verbose=True):
         print(f"total: {total}")
     return counts
 
-def drop_timestamp_inplace_from_files(imu_files):
-    """
-    imu_files: list of file paths (e.g., from glob.glob)
-    Removes 'timestamp' column if present and overwrites each CSV.
-    """
-    updated = 0
-    for csv_path in imu_files:
-        try:
-            df = pd.read_csv(csv_path, low_memory=False)
-        except Exception as e:
-            print(f"Skipping {csv_path}: read error: {e}")
-            continue
-
-        if "timestamp" in df.columns:
-            df.drop(columns=["timestamp"], inplace=True)
-            df.to_csv(csv_path, index=False)
-            updated += 1
-
 def add_pitch_to_df(df_imu, out_col="pitch_rad",
                         quat_cols=("quat_x","quat_y","quat_z","quat_w")):
     """
@@ -173,13 +149,153 @@ def add_pitch_to_df(df_imu, out_col="pitch_rad",
     df_imu.insert(insert_at, out_col, pitch)
     return df_imu
 
+def fix_length(df_imu: pd.DataFrame, target_len: int = 18_000, time_col_idx: int = 0, fs_hint: float = 50.0) -> None:
+    """
+    In-place: ensure df_imu has exactly `target_len` rows.
+      - If longer: drop trailing rows.
+      - If shorter: append mirrored rows from the tail for all *non-time* columns,
+        but extend the time column linearly using the median dt (fallback 1/fs_hint).
+
+    Parameters
+    ----------
+    df_imu : pd.DataFrame
+        IMU dataframe (first column assumed to be time in seconds).
+    target_len : int
+        Desired number of rows (default 18_000).
+    time_col_idx : int
+        Index of the time column (default 0).
+    fs_hint : float
+        Fallback sample rate in Hz if dt can't be inferred (default 50.0).
+
+    Returns
+    -------
+    None  (mutates df_imu in place)
+    """
+    if not isinstance(df_imu, pd.DataFrame):
+        raise TypeError("fix_length expects a pandas DataFrame")
+    n = len(df_imu)
+    if n == 0:
+        raise ValueError("Cannot pad an empty DataFrame to a target length.")
+
+    # --- Crop (in place) ---
+    if n > target_len:
+        df_imu.drop(df_imu.index[target_len:], inplace=True)
+        df_imu.reset_index(drop=True, inplace=True)
+        return
+
+    if n == target_len:
+        # nothing to do
+        return
+
+    # --- Compute dt from existing time column ---
+    time_col = df_imu.columns[time_col_idx]
+    t = df_imu.iloc[:, time_col_idx].astype(float).to_numpy()
+    if t.size >= 2:
+        diffs = np.diff(t)
+        diffs = diffs[np.isfinite(diffs)]
+        dt = float(np.median(diffs)) if diffs.size > 0 else (1.0 / fs_hint)
+        if not np.isfinite(dt) or dt <= 0:
+            dt = 1.0 / fs_hint
+    else:
+        dt = 1.0 / fs_hint
+    last_t = float(t[-1])
+
+    # --- Build mirrored padding for all columns, then overwrite time column ---
+    need = target_len - n
+    q, r = divmod(need, n)
+    tail_rev = df_imu.iloc[::-1].reset_index(drop=True)
+
+    pad_blocks = []
+    if q:
+        pad_blocks.extend([tail_rev] * q)
+    if r:
+        pad_blocks.append(tail_rev.iloc[:r])
+
+    pad = pd.concat(pad_blocks, ignore_index=True) if pad_blocks else df_imu.iloc[0:0].copy()
+    # Ensure column order matches exactly
+    pad = pad[df_imu.columns]
+
+    # Replace time column with linear extension at same sample rate
+    pad_times = last_t + dt * np.arange(1, need + 1, dtype=float)
+    pad.loc[:, time_col] = pad_times
+
+    # --- Append in place via .loc (expands the frame) ---
+    start_idx = n
+    end_idx = n + need - 1
+    df_imu.loc[start_idx:end_idx, df_imu.columns] = pad.to_numpy()
+
+    # Normalize the index
+    df_imu.reset_index(drop=True, inplace=True)
+
+def edit_csv():
+    """
+    Walk data/beep_schedules_*/, open each airpods_motion_*.csv,
+    add derived columns in place (e.g., pitch_rad), and save back.
+    """
+    DATA_ROOT = os.path.join(os.getcwd(), "data")
+    folder_glob = os.path.join(DATA_ROOT, "beep_schedules_*")
+    folders = sorted(p for p in glob.glob(folder_glob) if os.path.isdir(p))
+
+    if not folders:
+        print(f"⚠️ No folders found with pattern: {folder_glob}")
+        return
+
+    for folder_path in folders:
+        imu_glob = os.path.join(folder_path, "airpods_motion_*.csv")
+        imu_files = sorted(glob.glob(imu_glob))
+        if not imu_files:
+            print(f"⚠️ No IMU CSVs in {folder_path}")
+            continue
+
+        for csv_path in imu_files:
+            try:
+                df_imu = pd.read_csv(csv_path, low_memory=False)
+            except Exception as e:
+                print(f"❌ Skipping (read error): {csv_path}\n   ↳ {e}")
+                continue
+
+            # --- add/refresh derived columns (idempotent) ---
+            add_pitch_to_df(df_imu)  # modifies df_imu in place
+            fix_length(df_imu, target_len=18_000)
+
+            try:
+                df_imu.to_csv(csv_path, index=False)
+            except Exception as e:
+                print(f"❌ Failed to write: {csv_path}\n   ↳ {e}")
+                
+def find_shapes():
+    # pick the first IMU file under data/*/
+    DATA_ROOT = os.path.join(os.getcwd(), "data")
+    imu_glob = os.path.join(DATA_ROOT, 'beep_schedules_*', 'airpods_motion_*.csv')
+    imu_list = glob.glob(imu_glob)
+    if not imu_list:
+        raise FileNotFoundError(f"No IMU CSVs found with pattern: {imu_glob}")
+
+    df_imu = pd.read_csv(imu_list[0])  # use first found file
+
+    t = df_imu.iloc[:, 0].astype(float).to_numpy()
+    dt = np.diff(t)
+    dt_med = float(np.median(dt)) if dt.size > 0 else (1.0/50.0)
+    fs = (1.0 / dt_med) if dt_med > 0 else 50.0
+    stride = 0.5
+    len_window_sec = 1.5
+
+    win_len_frames = int(round(len_window_sec * fs))      # samples per window
+    stride_frames = int(round(stride * fs))    # samples per stride
+
+    # Recompute windows_per_rec from sample counts (more robust than using seconds)
+    N = df_imu.shape[0]                           # 18'000
+    windows_per_rec = max(0, 1 + (N - win_len_frames) // stride_frames)
+
+    return t, dt_med, fs, win_len_frames, stride_frames, N, windows_per_rec, stride, len_window_sec
+
+
 
 def X_and_y(type):
-    matching_folders, num_beep_schedules_folders = folders_tot(type)
-    df_imu0 = pd.read_csv(r"beep_schedules_Ivan0/airpods_motion_1759863949.csv")  # (see note below)
-    t, dt_med, fs, win_len_frames, stride_frames, n_ch, N, windows_per_rec, stride, len_window_sec = find_shapes()
-    X_tot = np.zeros((num_beep_schedules_folders*windows_per_rec, win_len_frames, n_ch), dtype=np.float32)
-    y_tot = np.zeros((num_beep_schedules_folders*windows_per_rec, 1), dtype=int)
+    matching_folders, n_folders = folders_tot(type)
+    _, _, _, win_len_frames, stride_frames, _, windows_per_rec, stride, len_window_sec = find_shapes()
+    X_tot = None
+    y_tot = np.zeros((n_folders * windows_per_rec, 1), dtype=int)
 
     for index, folder_path in enumerate(matching_folders):
         if not os.path.isdir(folder_path):
@@ -193,9 +309,6 @@ def X_and_y(type):
 
         df_event = pd.read_csv(event_files[0])
         df_imu   = pd.read_csv(imu_files[0])
-
-        # Add pitch (in place)
-        add_pitch_to_df(df_imu)
 
         # --- Align event times to IMU time axis ---
         t_imu = df_imu.iloc[:, 0].astype(float).to_numpy()
@@ -218,7 +331,7 @@ def X_and_y(type):
 
         times = ev['t_aligned'].to_numpy()
         names = ev['event'].astype(str).tolist()
-
+        
         # --- Labels: state at window END on IMU axis ---
         m = 0.2
         labels_array = np.zeros((windows_per_rec, 1), dtype=int)
@@ -229,6 +342,12 @@ def X_and_y(type):
 
         # --- Features: drop the time column by position (your current approach) ---
         Xsig = df_imu.iloc[:, 1:].to_numpy(dtype=np.float32, copy=False)
+        n_ch = Xsig.shape[1]
+        N = Xsig.shape[0]
+
+        # lazy allocation once we know n_ch
+        if X_tot is None:
+            X_tot = np.zeros((n_folders * windows_per_rec, win_len_frames, n_ch), dtype=np.float32)
 
         # --- Windowing ---
         base = index * windows_per_rec
@@ -238,7 +357,11 @@ def X_and_y(type):
             end = start + win_len_frames
             win = Xsig[start:end, :]
 
-            if win.shape[0] < win_len_frames:
+            # If start is beyond the signal (empty slice), repeat the last sample
+            if win.shape[0] == 0:
+                last = Xsig[-1:, :]
+                win = np.repeat(last, win_len_frames, axis=0)
+            elif win.shape[0] < win_len_frames:
                 need = win_len_frames - win.shape[0]
                 pad_tail = np.repeat(win[-1:, :], need, axis=0)
                 win = np.concatenate([win, pad_tail], axis=0)

@@ -149,30 +149,18 @@ def add_pitch_to_df(df_imu, out_col="pitch_rad",
     df_imu.insert(insert_at, out_col, pitch)
     return df_imu
 
-def fix_length(df_imu: pd.DataFrame, target_len: int = 18_000, time_col_idx: int = 0, fs_hint: float = 50.0) -> None:
+def fix_length(df_imu: pd.DataFrame, target_len: int = 18_000,
+               time_col_idx: int = 0, fs_hint: float = 50.0) -> None:
     """
     In-place: ensure df_imu has exactly `target_len` rows.
-      - If longer: drop trailing rows.
-      - If shorter: append mirrored rows from the tail for all *non-time* columns,
-        but extend the time column linearly using the median dt (fallback 1/fs_hint).
-
-    Parameters
-    ----------
-    df_imu : pd.DataFrame
-        IMU dataframe (first column assumed to be time in seconds).
-    target_len : int
-        Desired number of rows (default 18_000).
-    time_col_idx : int
-        Index of the time column (default 0).
-    fs_hint : float
-        Fallback sample rate in Hz if dt can't be inferred (default 50.0).
-
-    Returns
-    -------
-    None  (mutates df_imu in place)
+      - If longer: crop trailing rows.
+      - If shorter: append rows created by mirroring the tail for all *non-time* columns,
+        and extend the time column linearly using the median dt (fallback 1/fs_hint).
+    Returns None and mutates df_imu.
     """
     if not isinstance(df_imu, pd.DataFrame):
         raise TypeError("fix_length expects a pandas DataFrame")
+
     n = len(df_imu)
     if n == 0:
         raise ValueError("Cannot pad an empty DataFrame to a target length.")
@@ -184,48 +172,67 @@ def fix_length(df_imu: pd.DataFrame, target_len: int = 18_000, time_col_idx: int
         return
 
     if n == target_len:
-        # nothing to do
-        return
+        return  # nothing to do
 
-    # --- Compute dt from existing time column ---
+    # --- Compute dt from existing time column (robust to non-numeric) ---
     time_col = df_imu.columns[time_col_idx]
-    t = df_imu.iloc[:, time_col_idx].astype(float).to_numpy()
-    if t.size >= 2:
-        diffs = np.diff(t)
+    t = pd.to_numeric(df_imu.iloc[:, time_col_idx], errors="coerce").to_numpy()
+    finite = np.isfinite(t)
+    if finite.sum() >= 2:
+        diffs = np.diff(t[finite])
         diffs = diffs[np.isfinite(diffs)]
         dt = float(np.median(diffs)) if diffs.size > 0 else (1.0 / fs_hint)
         if not np.isfinite(dt) or dt <= 0:
             dt = 1.0 / fs_hint
     else:
         dt = 1.0 / fs_hint
-    last_t = float(t[-1])
+    last_t = float(t[finite][-1]) if finite.any() else 0.0
 
     # --- Build mirrored padding for all columns, then overwrite time column ---
     need = target_len - n
-    q, r = divmod(need, n)
     tail_rev = df_imu.iloc[::-1].reset_index(drop=True)
 
-    pad_blocks = []
-    if q:
-        pad_blocks.extend([tail_rev] * q)
-    if r:
-        pad_blocks.append(tail_rev.iloc[:r])
+    if need <= n:
+        pad = tail_rev.iloc[:need].copy()
+    else:
+        q, r = divmod(need, n)
+        blocks = [tail_rev] * q + ([tail_rev.iloc[:r].copy()] if r else [])
+        pad = pd.concat(blocks, ignore_index=True)
 
-    pad = pd.concat(pad_blocks, ignore_index=True) if pad_blocks else df_imu.iloc[0:0].copy()
-    # Ensure column order matches exactly
+    # Ensure exact column order
     pad = pad[df_imu.columns]
 
-    # Replace time column with linear extension at same sample rate
+    # Extend time linearly
     pad_times = last_t + dt * np.arange(1, need + 1, dtype=float)
     pad.loc[:, time_col] = pad_times
 
-    # --- Append in place via .loc (expands the frame) ---
-    start_idx = n
-    end_idx = n + need - 1
-    df_imu.loc[start_idx:end_idx, df_imu.columns] = pad.to_numpy()
+    # --- Append rows one-by-one (works in all pandas versions) ---
+    # Using itertuples(name=None) gives a plain tuple per row (fast and clean).
+    start = n
+    for i, row in enumerate(pad.itertuples(index=False, name=None)):
+        df_imu.loc[start + i] = row
 
     # Normalize the index
     df_imu.reset_index(drop=True, inplace=True)
+
+    # Safety
+    if len(df_imu) != target_len:
+        raise RuntimeError(f"fix_length failed: len={len(df_imu)} != target_len={target_len}")
+    
+def verify_lengths(root="data"):
+    bad = []
+    for folder in sorted(p for p in glob.glob(os.path.join(root, "beep_schedules_*")) if os.path.isdir(p)):
+        for csv_path in sorted(glob.glob(os.path.join(folder, "airpods_motion_*.csv"))):
+            n = pd.read_csv(csv_path, nrows=0).shape[0]  # header only
+            n = pd.read_csv(csv_path).shape[0]
+            if n != 18_000:
+                bad.append((csv_path, n))
+    if bad:
+        print("Files not at 18,000 rows:")
+        for p, n in bad:
+            print(f"  {n:5d}  {p}")
+    else:
+        print("All IMU CSVs have exactly 18,000 rows.")
 
 def edit_csv():
     """

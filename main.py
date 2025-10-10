@@ -1,6 +1,6 @@
 #from data_processing import plot_data, obtain_windows, drop_timestamp_inplace, train_test, count_all_zero_windows, count_labels
 from CNN import CNN_model, export_coreml
-from events_and_windowing import X_and_y, count_labels, edit_csv, count_all_zero_windows
+from events_and_windowing import X_and_y, count_labels, edit_csv, count_all_zero_windows, verify_lengths
 import warnings
 from urllib3.exceptions import NotOpenSSLWarning
 warnings.filterwarnings("ignore", category=NotOpenSSLWarning)
@@ -12,16 +12,16 @@ def main():
 
     # 2. create non-overlapping train, val & test sets
     X_train, y_train = X_and_y('train')
-    print(X_train[0,0,:])
-    '''
     print(count_labels(y_train))
     X_val, y_val = X_and_y('val')
     print(count_labels(y_val))
     X_test, y_test = X_and_y('test')
     print(count_labels(y_test))
     
+    verify_lengths()
     #count_all_zero_windows(X_test)
-    
+
+    '''
     # 3. Create & train CNN --> then evaluate
     cnn = CNN_model(X_train, y_train, X_val, y_val)
     print("Eval Score:")

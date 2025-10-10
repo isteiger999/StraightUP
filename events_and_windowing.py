@@ -134,7 +134,7 @@ def drop_timestamp_inplace_from_files(imu_files):
             df.to_csv(csv_path, index=False)
             updated += 1
 
-def add_pitch_in_memory(df_imu, out_col="pitch_rad",
+def add_pitch_to_df(df_imu, out_col="pitch_rad",
                         quat_cols=("quat_x","quat_y","quat_z","quat_w")):
     """
     Compute pitch (radians) from quaternions and INSERT it into df_imu in place.
@@ -195,7 +195,7 @@ def X_and_y(type):
         df_imu   = pd.read_csv(imu_files[0])
 
         # Add pitch (in place)
-        add_pitch_in_memory(df_imu)
+        add_pitch_to_df(df_imu)
 
         # --- Align event times to IMU time axis ---
         t_imu = df_imu.iloc[:, 0].astype(float).to_numpy()

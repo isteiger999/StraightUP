@@ -31,7 +31,8 @@ pip-wheel-metadata/
 Thumbs.db
 
 # Data / models / logs
-data/
+# data/
+no_slouch_data/
 datasets/
 logs/
 checkpoints/

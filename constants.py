@@ -10,7 +10,7 @@ FEATURE_ORDER = [
 #               2. beep sound (mav file), 
 #               3. empty csv (to be filled by detector)
 ''' (jitter is probabilistic)
-python generate_beep_schedule_5m15s.py --participant Ivaan3 \
+python generate_beep_schedule_5m15s.py --participant Test0 \
   --minutes 5 --cycle-len 15 --jitter 1.0 --initial-delay 2.0 --make-wav \
   --movements "normal_slouch,fast_slouch,micro_slouch,lateral_left,lateral_right,neck_only,reach_left,reach_right" \
   --complete-plan
@@ -31,7 +31,7 @@ python generate_beep_schedule_5m15s.py `
 
 '''
 # individually
-python batch_infer_events.py --participants David0 --verbose
+(NICHT NUTZEN, BESSER IMMER ALLE GLEICH) python batch_infer_events.py --participants David0 --verbose
 '''
 
 '''

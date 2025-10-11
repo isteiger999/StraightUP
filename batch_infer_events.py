@@ -1,4 +1,21 @@
 #!/usr/bin/env python3
+"""
+Batch-infer events for every airpods_motion_*.csv under ./data by default.
+
+Behavior:
+- Recursively finds all IMU CSVs matching: airpods_motion_*.csv (under --root, default: ./data)
+- For each IMU, hunts for an appropriate beep_schedule_*.csv (same folder first, then globally under --root);
+  best match is chosen by (1) filename similarity, then (2) closest modified time.
+- Runs a 2-pass axis-adaptive detection (strict then relaxed).
+- Always overwrites outputs placed NEXT TO the IMU file:
+    events_inferred_<imu-stem>.csv
+    events_debug_<imu-stem>.csv
+- If no schedule is found or a schedule has no beeps, a header-only output is still written.
+
+Usage:
+    python batch_infer_events.py --verbose
+"""
+
 import argparse, csv, math, os, re, sys
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -56,24 +73,31 @@ def find_col(df: "pd.DataFrame", patterns: List[str]) -> Optional[str]:
                 return c
     return None
 
+def _choose_time_scale_by_plausible_dt(dtn: np.ndarray) -> Tuple[float, str]:
+    """
+    Given raw diffs (same units as the raw time column), choose a scale -> seconds so that
+    median dt lands in a plausible IMU range (0.1 ms .. 1 s).
+    """
+    dtn = np.asarray(dtn, dtype=float)
+    dtn = dtn[np.isfinite(dtn) & (dtn != 0)]
+    if dtn.size == 0:
+        return 1.0, "unknown"
+
+    candidates = [("s", 1.0), ("ms->s", 1e-3), ("us->s", 1e-6), ("ns->s", 1e-9)]
+    for label, scale in candidates:
+        dt_med = float(np.median(np.abs(dtn) * scale))
+        if 1e-4 <= dt_med <= 1.0:   # 0.1 ms .. 1 s
+            return scale, label
+    return 1.0, "s"
+
 def normalize_time_units_by_dt(t_raw: np.ndarray) -> Tuple[np.ndarray, str]:
     t = t_raw.astype(float)
     tn = t[np.isfinite(t)]
     if len(tn) < 3:
         return t, "unknown"
     dtn = np.diff(tn)
-    dtn = dtn[np.isfinite(dtn) & (dtn != 0)]
-    if len(dtn) == 0:
-        return t, "unknown"
-    dt_med = float(np.median(np.abs(dtn)))
-    if dt_med > 5e6:
-        return t / 1e9, "ns->s"
-    elif dt_med > 5e3:
-        return t / 1e6, "us->s"
-    elif dt_med > 5.0:
-        return t / 1e3, "ms->s"
-    else:
-        return t, "s"
+    scale, label = _choose_time_scale_by_plausible_dt(dtn)
+    return t * scale, label
 
 def get_time_seconds(df: "pd.DataFrame") -> Tuple[np.ndarray, str]:
     tcol = None
@@ -165,18 +189,21 @@ def detect_for_axis(angle, dangle, gyromag, t, fs, i_beep, i0b, i1s,
     need = dtheta_in if strict else dtheta_in * RELAX_FACTOR
     onset_ok = (dtheta >= need)
 
-    # Hold detection (only if onset passed)
+    # Hold detection (only if onset passed) — fixed off-by-one and minimum length
     i_hold = None
     if onset_ok:
         calm_len = max(int(round(CALM_LEN_S * fs)), 3)
         th_hold_g = base_gm + GYRO_STD_CALM * std_gm
         need_hold = theta_hold if strict else theta_hold * RELAX_FACTOR
         for j in range(i_on, i1s):
-            j2 = min(j+calm_len, len(t)-1)
-            calm = bool(np.all(gyromag[j:j2] < th_hold_g))
-            high = abs(angle[j2] - base_ang) >= need_hold
+            j_end_idx = min(j + calm_len - 1, len(t) - 1)   # inclusive end
+            seg = gyromag[j : j_end_idx + 1]
+            if seg.size < calm_len:
+                break
+            calm = bool(np.all(seg < th_hold_g))
+            high = abs(angle[j_end_idx] - base_ang) >= need_hold
             if calm and high:
-                i_hold = j2
+                i_hold = j_end_idx
                 break
 
     score = (dtheta / need) if need > 1e-6 else 0.0
@@ -199,11 +226,21 @@ def infer_events_for_session(imu_csv: str, schedule_csv: str, out_csv: str,
         raise RuntimeError("Too few valid time samples after dropping NaNs.")
     imu = imu.loc[valid].reset_index(drop=True)
     t_sec = t_sec[valid]
+
+    # sort by time, then drop exact-duplicate timestamps to keep gradient stable
     order = np.argsort(t_sec, kind="mergesort")
     if not np.all(order == np.arange(len(order))):
         imu = imu.iloc[order].reset_index(drop=True); t_sec = t_sec[order]
+    dts_all = np.diff(t_sec)
+    keep = np.hstack(([True], dts_all > 0))
+    if not np.all(keep):
+        imu = imu.loc[keep].reset_index(drop=True)
+        t_sec = t_sec[keep]
+        dts_all = np.diff(t_sec)  # recompute after filtering
 
-    dt = float(np.median(np.diff(t_sec))); fs = (1.0/dt) if dt > 0 else 50.0
+    dts_pos = dts_all[dts_all > 0]
+    dt = float(np.median(dts_pos)) if dts_pos.size else 0.0
+    fs = (1.0/dt) if dt > 0 else 50.0
 
     # Gyro magnitude (optional)
     try:
@@ -232,13 +269,15 @@ def infer_events_for_session(imu_csv: str, schedule_csv: str, out_csv: str,
 
     if verbose:
         ss0, ss1 = float(sch["t_sec"].min()), float(sch["t_sec"].max())
-        print(f"[debug] IMU t range: {i0:.3f}..{i1:.3f} (dt~{dt:.3f}s @fs~{fs:.1f}Hz, units={t_units})")
+        print(f"[debug] IMU t range: {i0:.3f}..{i1:.3f} (dt~{(1/fs) if fs>0 else float('nan'):.3f}s @fs~{fs:.1f}Hz, units={t_units})")
         print(f"[debug] SCH t range: {ss0:.3f}..{ss1:.3f} (shift={shift:.3f})")
 
     # Beeps
     beeps = sch[sch["event"].isin(["BEEP_SLOUCH","BEEP_RECOVER"])].copy()
+    # Always write something; header-only if no beeps
     if beeps.empty:
         if verbose: print("[warn] No BEEP_SLOUCH/BEEP_RECOVER in schedule.")
+        os.makedirs(Path(out_csv).parent, exist_ok=True)
         with open(out_csv, "w", newline="") as f:
             csv.writer(f).writerow(["t_sec","event","value","confidence"])
         if WRITE_DEBUG:
@@ -321,7 +360,7 @@ def infer_events_for_session(imu_csv: str, schedule_csv: str, out_csv: str,
             else:  # RECOVER
                 out_rows.append([t[i_on], "RECOVERY_START", mv, conf_on])
                 if cand["hold_idx"] is not None:
-                    hold_time = t[cand["hold_idx"]]; hold_conf = float(UPRIGHT_NEAR_DEG)
+                    hold_time = t[cand["hold_idx"]]; hold_conf = float(cand["dtheta"])  # unified semantics
                     holds_detected += 1
                 else:
                     d_on, d_hold = FALLBACK_OFFSETS.get(mv, (0.45, 0.90))
@@ -349,7 +388,7 @@ def infer_events_for_session(imu_csv: str, schedule_csv: str, out_csv: str,
                 dbg_rows.append([t_beep, ev, mv, "fallback",
                                  np.nan, np.nan, 0.0, 0.0, max_pitch, max_roll])
 
-    # write outputs
+    # write outputs (always overwrite)
     os.makedirs(Path(out_csv).parent, exist_ok=True)
     with open(out_csv, "w", newline="") as f:
         w = csv.writer(f); w.writerow(["t_sec","event","value","confidence"])
@@ -373,83 +412,137 @@ def infer_events_for_session(imu_csv: str, schedule_csv: str, out_csv: str,
         "shift": shift
     }
 
-# ---------- IMU selection ----------
+# ---------- IMU / schedule discovery ----------
 def looks_like_non_imu(name: str) -> bool:
     lname = name.lower()
-    return lname.startswith("beep_schedule_") or lname.startswith("events_inferred") or lname.startswith("readme") or lname.endswith(".wav")
+    return (
+        lname.startswith("beep_schedule_")
+        or lname.startswith("events_inferred")
+        or lname.startswith("events_debug")
+        or lname.startswith("readme")
+        or lname.endswith(".wav")
+    )
 
-def is_valid_imu(path: Path) -> bool:
+def quick_is_valid_imu(path: Path) -> bool:
     if looks_like_non_imu(path.name): return False
     try:
         df = pd.read_csv(path, nrows=12)
         if df.empty: return False
         has_time = any(re.search(r"time|t_sec|timestamp", c, re.IGNORECASE) for c in df.columns)
-        has_gyro = any(re.search(r"\bg[x|y|z]\b|rotationRate", c, re.IGNORECASE) for c in df.columns)
+        has_gyro = any(re.search(r"\bg(?:x|y|z)\b|rotationRate", c, re.IGNORECASE) for c in df.columns)
         has_grav = any(re.search(r"grav|gravity", c, re.IGNORECASE) for c in df.columns)
         has_quat = any(re.search(r"^q[wxyz]_?|quaternion", c, re.IGNORECASE) for c in df.columns)
         return bool(has_time and (has_gyro or has_grav or has_quat))
     except Exception:
         return False
 
-def list_valid_imus(dir_path: Path) -> List[Path]:
-    return [p for p in dir_path.glob("*.csv") if is_valid_imu(p)]
+def list_imus(root: Path, pattern: str="airpods_motion_*.csv") -> List[Path]:
+    files = sorted(root.rglob(pattern))
+    return [p for p in files if p.is_file() and quick_is_valid_imu(p)]
 
-def choose_imu_for_folder(part_dir: Path, imu_dir: Path) -> Optional[Path]:
-    local = sorted(list_valid_imus(part_dir), key=lambda p: p.stat().st_mtime, reverse=True)
-    if local: return local[0]
-    global_imus = sorted(list_valid_imus(imu_dir), key=lambda p: p.stat().st_mtime, reverse=True)
-    return global_imus[0] if global_imus else None
+def _name_core(stem: str, prefix: str) -> str:
+    return stem[len(prefix):] if stem.startswith(prefix) else stem
+
+def _schedule_match_score(imu_path: Path, sch_path: Path) -> Tuple[int, float]:
+    """
+    Returns a tuple (name_score, -mtime_diff_seconds).
+    Higher is better. name_score: 2 exact, 1 partial, 0 none.
+    """
+    imu_core = _name_core(imu_path.stem, "airpods_motion_")
+    sch_core = _name_core(sch_path.stem, "beep_schedule_")
+    name_score = 0
+    if sch_core == imu_core:
+        name_score = 2
+    elif sch_core in imu_path.stem or imu_core in sch_path.stem:
+        name_score = 1
+    mtime_diff = abs(imu_path.stat().st_mtime - sch_path.stat().st_mtime)
+    return (name_score, -mtime_diff)
+
+def find_schedule_for_imu(imu_path: Path, all_schedules: List[Path]) -> Optional[Path]:
+    # Prefer schedules in the same folder as the IMU first
+    local = [p for p in imu_path.parent.glob("beep_schedule_*.csv") if p.is_file()]
+    candidates = local if local else all_schedules
+    if not candidates:
+        return None
+    scored = sorted(candidates, key=lambda p: _schedule_match_score(imu_path, p), reverse=True)
+    return scored[0]
+
+def write_empty_outputs(out_csv: str, debug_csv: str, verbose: bool, reason: str):
+    os.makedirs(Path(out_csv).parent, exist_ok=True)
+    with open(out_csv, "w", newline="") as f:
+        csv.writer(f).writerow(["t_sec","event","value","confidence"])
+    if WRITE_DEBUG:
+        with open(debug_csv, "w", newline="") as f:
+            csv.writer(f).writerow(["t_beep","event","type","axis_chosen","onset_time","hold_time","onset_score","dtheta","max_pitch","max_roll"])
+    if verbose:
+        print(f"[warn] Wrote header-only outputs ({reason}).")
 
 # ---------- Batch driver ----------
 def main():
-    ap = argparse.ArgumentParser(description="Batch infer events for beep_schedules_* folders (axis-adaptive, 2-pass, guaranteed 2 events per positive beep).")
-    ap.add_argument("--imu-dir", type=str, default="slouch_data", help="Fallback IMU CSV dir if none inside participant folder.")
-    ap.add_argument("--participants", type=str, default=None, help="Comma list (e.g., Ivan0,Claire1). If omitted, scans all beep_schedules_* folders.")
+    ap = argparse.ArgumentParser(description="Batch infer events for every airpods_motion_*.csv under the given root (default: ./data).")
+    ap.add_argument("--root", type=str, default="data", help="Root folder to search (default: ./data).")
+    ap.add_argument("--glob", type=str, default="airpods_motion_*.csv", help="Glob for IMU files (default: airpods_motion_*.csv).")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
-    proj = Path.cwd()
-    imu_dir = (proj / args.imu_dir).resolve()
-    parts = [p.strip() for p in args.participants.split(",")] if args.participants else \
-            [p.name.replace("beep_schedules_","") for p in proj.glob("beep_schedules_*") if p.is_dir()]
+    root = Path(args.root).resolve()
+    if not root.exists():
+        print(f"[error] Root folder does not exist: {root}", file=sys.stderr)
+        sys.exit(1)
 
-    if not parts:
-        print("[error] No participant folders found and no --participants provided.", file=sys.stderr)
+    # Index all schedules under root once
+    all_schedules = sorted(root.rglob("beep_schedule_*.csv"))
+
+    imus = list_imus(root, args.glob)
+    if not imus:
+        print("[error] No IMU files found under", root, "matching pattern:", args.glob, file=sys.stderr)
         sys.exit(1)
 
     summary = []
-    for part in parts:
-        part_dir = proj / f"beep_schedules_{part}"
-        if not part_dir.exists():
-            print(f"[skip] Folder not found: {part_dir}")
-            continue
-
-        sched_list = sorted(part_dir.glob("beep_schedule_*.csv"), key=lambda p: p.stat().st_mtime)
-        if not sched_list:
-            print(f"[skip] No schedule CSV in {part_dir}")
-            continue
-        schedule_csv = str(sched_list[-1])
-
-        imu_path = choose_imu_for_folder(part_dir, imu_dir)
-        if imu_path is None:
-            print(f"[skip] No IMU CSV found for {part} (checked {part_dir} and {imu_dir})")
-            continue
+    for imu_path in imus:
         imu_csv = str(imu_path)
+        stem_core = _name_core(imu_path.stem, "airpods_motion_")
+        out_csv   = str(imu_path.parent / f"events_inferred_{stem_core}.csv")
+        debug_csv = str(imu_path.parent / f"events_debug_{stem_core}.csv")
 
-        out_csv   = str(part_dir / f"events_inferred_template_{part}.csv")
-        debug_csv = str(part_dir / f"events_debug_{part}.csv")
+        sch_path = find_schedule_for_imu(imu_path, all_schedules)
+        if sch_path is None:
+            print(f"[skip] No schedule CSV found for {imu_path.relative_to(root)}")
+            write_empty_outputs(out_csv, debug_csv, args.verbose, reason="no_schedule")
+            summary.append((str(imu_path.relative_to(root)), 0, 0, 0, 0, 0, 0.0, False))
+            continue
 
-        print(f"[run] {part}  IMU={Path(imu_csv).name}  SCHED={Path(schedule_csv).name}  -> {Path(out_csv).name}")
-        stats = infer_events_for_session(imu_csv, schedule_csv, out_csv, debug_csv, verbose=args.verbose)
-        summary.append((part, stats["events"], stats["holds_total"], stats["holds_detected"], stats["beeps_in_range"], stats["beeps_total"], stats["shift"]))
-        print(f"[ok ] {part}: events={stats['events']} holds_total={stats['holds_total']} holds_detected={stats['holds_detected']} beeps_in_range={stats['beeps_in_range']}/{stats['beeps_total']} shift={stats['shift']:.3f}")
+        schedule_csv = str(sch_path)
+        print(f"[run] {imu_path.relative_to(root)}  SCHED={sch_path.relative_to(root)}  -> {Path(out_csv).name}")
+
+        try:
+            stats = infer_events_for_session(imu_csv, schedule_csv, out_csv, debug_csv, verbose=args.verbose)
+            ok = True
+        except Exception as e:
+            ok = False
+            print(f"[fail] {imu_path.name}: {e}", file=sys.stderr)
+            write_empty_outputs(out_csv, debug_csv, args.verbose, reason="exception")
+            stats = {"events":0,"holds_total":0,"holds_detected":0,"beeps_in_range":0,"beeps_total":0,"shift":0.0}
+
+        summary.append((
+            str(imu_path.relative_to(root)),
+            stats["events"], stats["holds_total"], stats["holds_detected"],
+            stats["beeps_in_range"], stats["beeps_total"], stats["shift"], ok
+        ))
+
+        if ok:
+            print(f"[ok ] {imu_path.name}: events={stats['events']} holds_total={stats['holds_total']} "
+                  f"holds_detected={stats['holds_detected']} beeps_in_range={stats['beeps_in_range']}/{stats['beeps_total']} "
+                  f"shift={stats['shift']:.3f}")
 
     if summary:
         print("\n=== Summary ===")
-        for part, ev, htot, hdet, bir, bt, sh in summary:
-            print(f"{part:>12}: events={ev:4d} holds_total={htot:3d} holds_detected={hdet:3d} beeps_in_range={bir:2d}/{bt:2d} shift={sh:7.3f}")
+        for relpath, ev, htot, hdet, bir, bt, sh, ok in summary:
+            mark = "OK" if ok else "ERR"
+            print(f"{mark:>3}  {relpath}: events={ev:4d} holds_total={htot:3d} "
+                  f"holds_detected={hdet:3d} beeps_in_range={bir:2d}/{bt:2d} shift={sh:7.3f}")
     else:
-        print("[warn] No sessions processed.]")
+        print("[warn] No files processed.")
 
 if __name__ == "__main__":
     main()

@@ -349,12 +349,13 @@ def X_and_y(type):
         if not os.path.isdir(folder_path):
             continue
 
-        event_files = glob.glob(os.path.join(folder_path, 'events_inferred_template_*.csv'))
+        #event_files = glob.glob(os.path.join(folder_path, 'events_inferred_template_*.csv'))
+        event_files = glob.glob(os.path.join(folder_path, 'events_inferred_*.csv'))
         imu_files   = glob.glob(os.path.join(folder_path, 'airpods_motion_*.csv'))
         if not event_files or not imu_files:
             print(f"⚠️ Missing files in {folder_path}")
             continue
-
+        
         df_event = pd.read_csv(event_files[0])
         df_imu   = pd.read_csv(imu_files[0])
 

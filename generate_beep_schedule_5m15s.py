@@ -59,7 +59,7 @@ def generate_schedule(participant, minutes=5, cycle_len=15.0, jitter=1.0,
     outdir.mkdir(parents=True, exist_ok=True)
 
     schedule_csv = outdir / f"beep_schedule_{tag}.csv"
-    inferred_csv = outdir / f"events_inferred_template_{tag}.csv"
+    inferred_csv = None  # intentionally not created per request
     wav_path     = outdir / f"beeps_{tag}.wav"
 
     rows = []
@@ -89,8 +89,7 @@ def generate_schedule(participant, minutes=5, cycle_len=15.0, jitter=1.0,
         w = csv.writer(f); w.writerow(["t_sec","event","value"])
         for t, ev, val in rows: w.writerow([f"{t:.3f}", ev, val])
 
-    with open(inferred_csv, "w", newline="") as f:
-        w = csv.writer(f); w.writerow(["t_sec","event","value","confidence"])
+    # Intentionally do not create events_inferred_template CSV.
 
     if make_wav and (np is not None) and (wave is not None):
         duration   = initial_delay + total_cycles * cycle_len  # include initial silence
@@ -138,7 +137,8 @@ def generate_schedule(participant, minutes=5, cycle_len=15.0, jitter=1.0,
         f.write(f"Final movement in last cycle: {movement_plan[-1]}\n")
         f.write(f"Approx total duration: {initial_delay + total_cycles*cycle_len:.1f}s\n")
 
-    return str(schedule_csv), str(inferred_csv), (str(wav_path) if make_wav else None)
+    # Keep return signature; inferred_csv is None since it's not created.
+    return str(schedule_csv), None, (str(wav_path) if make_wav else None)
 
 def main():
     p = argparse.ArgumentParser(description="Generate 5-min beep schedule (15 s cycles) with initial silence; names use only participant ID")
@@ -173,7 +173,7 @@ def main():
         complete_plan=args.complete_plan,
     )
     print("Wrote:", schedule_csv)
-    print("Wrote:", inferred_csv)
+    # No inferred template file created, so no print.
     if wav_path: print("Wrote:", wav_path)
 
 if __name__ == "__main__":

@@ -19,7 +19,7 @@ python generate_beep_schedule_5m15s.py --participant Ivaan3 \
 '''
 Windows laptop:
 python generate_beep_schedule_5m15s.py `
-  --participant David3 `
+  --participant Dario3 `
   --minutes 5 `
   --cycle-len 15 `
   --jitter 1.0 `

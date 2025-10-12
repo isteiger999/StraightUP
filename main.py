@@ -1,5 +1,6 @@
 from CNN import CNN_model, export_coreml
 from events_and_windowing import X_and_y, count_labels, edit_csv, count_all_zero_windows, verify_lengths
+from TCN import train_eval_tcn
 import warnings
 from urllib3.exceptions import NotOpenSSLWarning
 import matplotlib.pyplot as plt
@@ -38,14 +39,19 @@ def main():
     plt.legend()
     plt.show()
     '''
-    
+    '''
     # 3. Create & train CNN --> then evaluate
     cnn = CNN_model(X_train, y_train, X_val, y_val)
-    print("Eval Score:")
+    print("CNN Eval Score:")
     cnn.evaluate(X_test, y_test)
     print("Done evaluating")
     # export_coreml(X_train, cnn)
-    
+    '''
+    # 4. Try TCN
+    TCN_model = train_eval_tcn(X_train, y_train, X_val, y_val, verbose=1)
+    print("TCN Eval Score:")
+    TCN_model.evaluate(X_test, y_test)
+    print("Done evaluating")
 
 if __name__ == '__main__':
     main()

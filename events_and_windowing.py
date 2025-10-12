@@ -176,6 +176,159 @@ def add_pitch_to_df(df_imu, out_col="pitch_rad",
     df_imu.insert(insert_at, out_col, pitch)
     return df_imu
 
+def add_roll_to_df(df_imu, out_col="roll_rad",
+                   quat_cols=("quat_x","quat_y","quat_z","quat_w")):
+    """
+    Add roll (radians) as a RELATIVE angle to the first valid frame.
+
+    Strategy:
+      A) If grav_x/grav_y/grav_z exist (preferred, drift-free):
+           roll_abs = atan2(grav_y, grav_z)           # in (-pi, pi]
+           roll     = wrap_to_pi(roll_abs - roll_abs[0_valid])
+      B) Else if quaternions exist:
+           Normalize each quaternion row.
+           Let q0 = first valid normalized quaternion.
+           q_rel(t) = conj(q0) * q(t)
+           roll     = atan2(2*(w*x + y*z), 1 - 2*(x^2 + y^2))   # from q_rel
+
+    No unwrapping is used; results stay in (-pi, pi] and return to ~0 when you
+    return to the starting pose. The column is inserted after 'grav_z' if present,
+    else after 'quat_w', else at the end. Modifies df_imu in place and returns it.
+    """
+    import numpy as np
+
+    def wrap_to_pi(a):
+        return (a + np.pi) % (2.0 * np.pi) - np.pi
+
+    # -------- Path A: gravity (robust to drift) --------
+    if {"grav_x", "grav_y", "grav_z"}.issubset(df_imu.columns):
+        gy = df_imu["grav_y"].to_numpy(dtype=np.float64, copy=False)
+        gz = df_imu["grav_z"].to_numpy(dtype=np.float64, copy=False)
+        roll_abs = np.arctan2(gy, gz)  # (-pi, pi]
+
+        valid = np.isfinite(roll_abs)
+        if not valid.any():
+            return df_imu
+        i0 = int(np.flatnonzero(valid)[0])
+        roll0 = roll_abs[i0]
+        roll = wrap_to_pi(roll_abs - roll0)
+
+    # -------- Path B: quaternion (relative orientation) --------
+    elif all(c in df_imu.columns for c in quat_cols):
+        x = df_imu[quat_cols[0]].to_numpy(dtype=np.float64, copy=False)
+        y = df_imu[quat_cols[1]].to_numpy(dtype=np.float64, copy=False)
+        z = df_imu[quat_cols[2]].to_numpy(dtype=np.float64, copy=False)
+        w = df_imu[quat_cols[3]].to_numpy(dtype=np.float64, copy=False)
+
+        qn = np.sqrt(x*x + y*y + z*z + w*w)
+        good = qn > 1e-12
+        if not good.any():
+            return df_imu
+
+        # Normalize rows
+        x = np.where(good, x / qn, np.nan)
+        y = np.where(good, y / qn, np.nan)
+        z = np.where(good, z / qn, np.nan)
+        w = np.where(good, w / qn, np.nan)
+
+        i0 = int(np.flatnonzero(good)[0])
+        x0, y0, z0, w0 = x[i0], y[i0], z[i0], w[i0]
+
+        # q_rel = conj(q0) * q  (xyzw order; conj(q0) = (-x0, -y0, -z0, w0))
+        xr = w0*x - x0*w - y0*z + z0*y
+        yr = w0*y + x0*z - y0*w - z0*x
+        zr = w0*z - x0*y + y0*x - z0*w
+        wr = w0*w + x0*x + y0*y + z0*z
+
+        # Euler roll from q_rel (Z-Y-X convention)
+        t0 = 2.0 * (wr*xr + yr*zr)
+        t1 = 1.0 - 2.0 * (xr*xr + yr*yr)
+        roll = np.arctan2(t0, t1)  # already in (-pi, pi]
+
+    else:
+        return df_imu
+
+    # -------- Insert/replace column in a stable location --------
+    if out_col in df_imu.columns:
+        df_imu.drop(columns=[out_col], inplace=True)
+
+    cols = list(df_imu.columns)
+    if "grav_z" in cols:
+        insert_at = cols.index("grav_z") + 1
+    elif "quat_w" in cols:
+        insert_at = cols.index("quat_w") + 1
+    else:
+        insert_at = len(cols)
+
+    df_imu.insert(insert_at, out_col, roll)
+    return df_imu
+
+
+def add_yaw_to_df(df_imu, out_col="yaw_rad",
+                  quat_cols=("quat_x","quat_y","quat_z","quat_w")):
+    """
+    Add yaw (radians) as a RELATIVE angle to the first valid frame.
+
+    Yaw cannot be derived from gravity alone. We use quaternions:
+        Normalize each quaternion row.
+        Let q0 = first valid normalized quaternion.
+        q_rel(t) = conj(q0) * q(t)
+        yaw      = atan2(2*(w*z + x*y), 1 - 2*(y^2 + z^2))  # from q_rel
+
+    No unwrapping; yaw stays in (-pi, pi] and returns to ~0 whenever the user
+    returns to the starting pose (aside from true sensor-fusion drift).
+    Column placement mirrors pitch/roll functions. Modifies df_imu in place and returns it.
+    """
+    import numpy as np
+
+    if not all(c in df_imu.columns for c in quat_cols):
+        return df_imu  # cannot compute yaw reliably without quaternions
+
+    x = df_imu[quat_cols[0]].to_numpy(dtype=np.float64, copy=False)
+    y = df_imu[quat_cols[1]].to_numpy(dtype=np.float64, copy=False)
+    z = df_imu[quat_cols[2]].to_numpy(dtype=np.float64, copy=False)
+    w = df_imu[quat_cols[3]].to_numpy(dtype=np.float64, copy=False)
+
+    qn = np.sqrt(x*x + y*y + z*z + w*w)
+    good = qn > 1e-12
+    if not good.any():
+        return df_imu
+
+    # Normalize rows
+    x = np.where(good, x / qn, np.nan)
+    y = np.where(good, y / qn, np.nan)
+    z = np.where(good, z / qn, np.nan)
+    w = np.where(good, w / qn, np.nan)
+
+    i0 = int(np.flatnonzero(good)[0])
+    x0, y0, z0, w0 = x[i0], y[i0], z[i0], w[i0]
+
+    # q_rel = conj(q0) * q  (xyzw order; conj(q0) = (-x0, -y0, -z0, w0))
+    xr = w0*x - x0*w - y0*z + z0*y
+    yr = w0*y + x0*z - y0*w - z0*x
+    zr = w0*z - x0*y + y0*x - z0*w
+    wr = w0*w + x0*x + y0*y + z0*z
+
+    # Euler yaw from q_rel (Z-Y-X convention)
+    t3 = 2.0 * (wr*zr + xr*yr)
+    t4 = 1.0 - 2.0 * (yr*yr + zr*zr)
+    yaw = np.arctan2(t3, t4)  # in (-pi, pi]
+
+    # -------- Insert/replace column in a stable location --------
+    if out_col in df_imu.columns:
+        df_imu.drop(columns=[out_col], inplace=True)
+
+    cols = list(df_imu.columns)
+    if "grav_z" in cols:
+        insert_at = cols.index("grav_z") + 1
+    elif "quat_w" in cols:
+        insert_at = cols.index("quat_w") + 1
+    else:
+        insert_at = len(cols)
+
+    df_imu.insert(insert_at, out_col, yaw)
+    return df_imu
+
 
 def fix_length(df_imu: pd.DataFrame, target_len: int = 18_000,
                time_col_idx: int = 0, fs_hint: float = 50.0) -> None:
@@ -330,8 +483,10 @@ def edit_csv():
                 continue
 
             # --- add/refresh derived columns (idempotent) ---
-            add_pitch_to_df(df_imu)  # modifies df_imu in place
             fix_length(df_imu, target_len=18_000)
+            add_pitch_to_df(df_imu)  # modifies df_imu in place
+            add_roll_to_df(df_imu)
+            add_yaw_to_df(df_imu)
 
             #normalize_chanels(df_imu)
 

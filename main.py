@@ -25,10 +25,10 @@ def main():
     #count_all_zero_windows(X_test)
 
     df0 = pd.read_csv(r"data/beep_schedules_Mohid2/airpods_motion_1760174060.csv")
-    pitch = df0['pitch_rad']
+    pitch = df0['yaw_rad']
     plt.plot(np.arange(pitch.shape[0]), pitch)
     plt.xlabel("Time")
-    plt.ylabel("Pitch [rad]")
+    plt.ylabel("[rad]")
     plt.legend()
     #plt.show()
 
@@ -39,19 +39,20 @@ def main():
     plt.legend()
     plt.show()
     '''
-    '''
+    
     # 3. Create & train CNN --> then evaluate
     cnn = CNN_model(X_train, y_train, X_val, y_val)
     print("CNN Eval Score:")
     cnn.evaluate(X_test, y_test)
     print("Done evaluating")
     # export_coreml(X_train, cnn)
-    '''
+    
     # 4. Try TCN
     TCN_model = train_eval_tcn(X_train, y_train, X_val, y_val, verbose=1)
     print("TCN Eval Score:")
     TCN_model.evaluate(X_test, y_test)
     print("Done evaluating")
+    
 
 if __name__ == '__main__':
     main()

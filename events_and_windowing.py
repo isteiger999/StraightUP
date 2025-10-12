@@ -111,29 +111,57 @@ def count_labels(y, labels=(0, 1, 2), verbose=True):
     return counts
 
 def add_pitch_to_df(df_imu, out_col="pitch_rad",
-                        quat_cols=("quat_x","quat_y","quat_z","quat_w")):
+                    quat_cols=("quat_x","quat_y","quat_z","quat_w")):
     """
-    Compute pitch (radians) from quaternions and INSERT it into df_imu in place.
-    Column is placed after 'grav_z' if present, else after 'quat_w', else at end.
-    Does not write to disk. Returns df_imu for convenience.
+    Add a robust head/torso pitch estimate in radians.
+
+    Strategy:
+      1) If grav_x/grav_y/grav_z exist, compute pitch from gravity:
+           pitch = atan2(-grav_x, sqrt(grav_y^2 + grav_z^2))
+         This is scale-invariant and avoids gimbal-lock artifacts.
+      2) Otherwise, compute pitch from quaternion (x,y,z,w) **after row-wise normalization**:
+           sinp = 2*(w*y - z*x)
+           pitch = arcsin(clip(sinp, -1, 1))
+
+    The column is inserted after 'grav_z' if present, else after 'quat_w', else at the end.
+    The function modifies df_imu in place and returns it for convenience.
     """
-    # Ensure quaternion columns exist
-    missing = [c for c in quat_cols if c not in df_imu.columns]
-    if missing:
-        # quietly do nothing if quats missing
+    import numpy as np
+
+    # ---- Path A: prefer gravity when available (robust, scale-invariant) ----
+    if {"grav_x", "grav_y", "grav_z"}.issubset(df_imu.columns):
+        gx = df_imu["grav_x"].to_numpy(dtype=np.float64, copy=False)
+        gy = df_imu["grav_y"].to_numpy(dtype=np.float64, copy=False)
+        gz = df_imu["grav_z"].to_numpy(dtype=np.float64, copy=False)
+
+        # Pitch: rotation about device's left-right axis; negative is forward flexion if gx>0
+        pitch = np.arctan2(-gx, np.sqrt(gy*gy + gz*gz))
+
+    # ---- Path B: fall back to quaternion (normalize first) -------------------
+    elif all(c in df_imu.columns for c in quat_cols):
+        x = df_imu[quat_cols[0]].to_numpy(dtype=np.float64, copy=False)
+        y = df_imu[quat_cols[1]].to_numpy(dtype=np.float64, copy=False)
+        z = df_imu[quat_cols[2]].to_numpy(dtype=np.float64, copy=False)
+        w = df_imu[quat_cols[3]].to_numpy(dtype=np.float64, copy=False)
+
+        # Row-wise normalization to avoid arcsin saturation from non-unit quats
+        qn = np.sqrt(x*x + y*y + z*z + w*w)
+        good = qn > 1e-12
+        x = np.where(good, x / qn, np.nan)
+        y = np.where(good, y / qn, np.nan)
+        z = np.where(good, z / qn, np.nan)
+        w = np.where(good, w / qn, np.nan)
+
+        # Tait–Bryan: Z-Y-X (yaw-pitch-roll), pitch about Y
+        sinp = 2.0 * (w*y - z*x)
+        sinp = np.clip(sinp, -1.0, 1.0)  # numerical safety
+        pitch = np.arcsin(sinp)
+
+    else:
+        # Neither gravity nor the specified quaternion columns are present: no-op
         return df_imu
 
-    # Vectorized pitch computation (Tait–Bryan, pitch about Y)
-    x = df_imu[quat_cols[0]].to_numpy(dtype=np.float64, copy=False)
-    y = df_imu[quat_cols[1]].to_numpy(dtype=np.float64, copy=False)
-    z = df_imu[quat_cols[2]].to_numpy(dtype=np.float64, copy=False)
-    w = df_imu[quat_cols[3]].to_numpy(dtype=np.float64, copy=False)
-
-    sinp = 2.0 * (w * y - z * x)
-    sinp = np.clip(sinp, -1.0, 1.0)
-    pitch = np.arcsin(sinp)  # radians
-
-    # If column already exists, drop it so we can control its position
+    # ---- Insert/replace column in a stable location -------------------------
     if out_col in df_imu.columns:
         df_imu.drop(columns=[out_col], inplace=True)
 
@@ -145,9 +173,9 @@ def add_pitch_to_df(df_imu, out_col="pitch_rad",
     else:
         insert_at = len(cols)
 
-    # Insert in place
     df_imu.insert(insert_at, out_col, pitch)
     return df_imu
+
 
 def fix_length(df_imu: pd.DataFrame, target_len: int = 18_000,
                time_col_idx: int = 0, fs_hint: float = 50.0) -> None:
@@ -304,6 +332,7 @@ def edit_csv():
             # --- add/refresh derived columns (idempotent) ---
             add_pitch_to_df(df_imu)  # modifies df_imu in place
             fix_length(df_imu, target_len=18_000)
+
             #normalize_chanels(df_imu)
 
             try:

@@ -62,12 +62,13 @@ def CNN_model(X_train, y_train, X_val, y_val, n_classes=3):
     y_train = y_train.squeeze().astype("int32")
     y_val   = y_val.squeeze().astype("int32")
 
-    l2 = regularizers.l2(5e-4)
+    l2 = regularizers.l2(8e-4)
 
     # Per-feature normalization (fit on train only)
     norm = layers.Normalization(axis=-1)
     norm.adapt(X_train.astype("float32"))
 
+    # used to be: 32, 64, 96
     cnn = models.Sequential([
         layers.Input(shape=(T, n_ch)),
         norm,
@@ -79,7 +80,7 @@ def CNN_model(X_train, y_train, X_val, y_val, n_classes=3):
 
         layers.Conv1D(64, 7,  padding="causal", activation="relu", kernel_regularizer=l2),
         layers.MaxPooling1D(2),
-
+        
         layers.GlobalAveragePooling1D(),
         layers.Dropout(0.30),
         layers.Dense(64, activation="relu", kernel_regularizer=l2),

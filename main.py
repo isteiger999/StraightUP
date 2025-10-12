@@ -4,6 +4,7 @@ import warnings
 from urllib3.exceptions import NotOpenSSLWarning
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 warnings.filterwarnings("ignore", category=NotOpenSSLWarning)
 
 
@@ -22,13 +23,21 @@ def main():
     verify_lengths()
     #count_all_zero_windows(X_test)
 
-    
+    df0 = pd.read_csv(r"data/beep_schedules_Mohid2/airpods_motion_1760174060.csv")
+    pitch = df0['pitch_rad']
+    plt.plot(np.arange(pitch.shape[0]), pitch)
+    plt.xlabel("Time")
+    plt.ylabel("Pitch [rad]")
+    plt.legend()
+    #plt.show()
+
+    '''
     plt.plot(np.arange(718), y_train[:718])
     plt.ylabel("label")
     plt.xlabel("Time")
     plt.legend()
     plt.show()
-    
+    '''
     
     # 3. Create & train CNN --> then evaluate
     cnn = CNN_model(X_train, y_train, X_val, y_val)

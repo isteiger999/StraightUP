@@ -53,6 +53,7 @@ class BalancedAccuracy(tf.keras.metrics.Metric):
 
 
 def CNN_model(X_train, y_train, X_val, y_val, n_classes=3):
+    T = X_train.shape[1]
     n_ch = X_train.shape[2]
     assert X_train.ndim == 3 and X_train.shape[1:] == (75, n_ch)
     assert X_val.shape[1:]   == (75, n_ch)
@@ -61,22 +62,22 @@ def CNN_model(X_train, y_train, X_val, y_val, n_classes=3):
     y_train = y_train.squeeze().astype("int32")
     y_val   = y_val.squeeze().astype("int32")
 
-    l2 = regularizers.l2(1e-4)
+    l2 = regularizers.l2(5e-4)
 
     # Per-feature normalization (fit on train only)
     norm = layers.Normalization(axis=-1)
     norm.adapt(X_train.astype("float32"))
 
     cnn = models.Sequential([
-        layers.Input(shape=(75, n_ch)),
+        layers.Input(shape=(T, n_ch)),
         norm,
-        layers.Conv1D(32, 11, padding="same", activation="relu", kernel_regularizer=l2),
+        layers.Conv1D(16, 11, padding="causal", activation="relu", kernel_regularizer=l2),
         layers.MaxPooling1D(2),
 
-        layers.Conv1D(64, 9,  padding="same", activation="relu", kernel_regularizer=l2),
+        layers.Conv1D(32, 9,  padding="causal", activation="relu", kernel_regularizer=l2),
         layers.MaxPooling1D(2),
 
-        layers.Conv1D(96, 7,  padding="same", activation="relu", kernel_regularizer=l2),
+        layers.Conv1D(64, 7,  padding="causal", activation="relu", kernel_regularizer=l2),
         layers.MaxPooling1D(2),
 
         layers.GlobalAveragePooling1D(),
@@ -87,8 +88,10 @@ def CNN_model(X_train, y_train, X_val, y_val, n_classes=3):
     ])
 
     cnn.compile(
-        optimizer=tf.keras.optimizers.Adam(1e-3),
         loss="sparse_categorical_crossentropy",
+        #optimizer  = tf.keras.optimizers.AdamW(learning_rate=3e-4, weight_decay=1e-4),
+        optimizer=tf.keras.optimizers.Adam(1e-3),
+        #loss = tf.keras.losses.SparseCategoricalCrossentropy(label_smoothing=0.05),
         metrics=["accuracy", BalancedAccuracy(n_classes=3)]
     )
 
@@ -99,7 +102,7 @@ def CNN_model(X_train, y_train, X_val, y_val, n_classes=3):
         tf.keras.callbacks.EarlyStopping(monitor=monitor, mode="max",
                                         patience=15, restore_best_weights=True),
         tf.keras.callbacks.ReduceLROnPlateau(monitor=monitor, mode="max",
-                                            factor=0.5, patience=3),
+                                            factor=0.5, patience=5),
     ]
 
     # For class imbalances (we have much more 0 than 1 and 2)
@@ -124,13 +127,15 @@ def CNN_model(X_train, y_train, X_val, y_val, n_classes=3):
     return cnn
 
 
-def export_coreml(model, out_path="PostureCNN.mlpackage"):
+def export_coreml(X_train, model, out_path="PostureCNN.mlpackage"):
+    T = X_train.shape[1]
+    n_ch = X_train.shape[2]
     mlmodel = ct.convert(
         model,
         source="tensorflow",
         convert_to="mlprogram",
         inputs=[ct.TensorType(name=model.inputs[0].name.split(":")[0],
-                              shape=(1, 400, 14), dtype=np.float32)]
+                              shape=(1, T, n_ch), dtype=np.float32)]
     )
     mlmodel.save(out_path)   # <- .mlpackage
     print(f"✅ Saved {out_path}")

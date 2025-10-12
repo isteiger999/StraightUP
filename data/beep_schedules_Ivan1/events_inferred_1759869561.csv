@@ -1,4 +1,5 @@
 t_sec,event,value,confidence
+1759869563.588,UPRIGHT_HOLD_START,type=normal_slouch,0.000
 1759869568.281,SLOUCH_START,type=normal_slouch,2.007
 1759869569.134,SLOUCHED_HOLD_START,type=normal_slouch,321.519
 1759869572.781,RECOVERY_START,type=normal_slouch,2.685

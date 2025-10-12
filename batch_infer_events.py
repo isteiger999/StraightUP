@@ -7,10 +7,14 @@ Behavior:
 - For each IMU, hunts for an appropriate beep_schedule_*.csv (same folder first, then globally under --root);
   best match is chosen by (1) filename similarity, then (2) closest modified time.
 - Runs a 2-pass axis-adaptive detection (strict then relaxed).
+- ALWAYS seeds an initial UPRIGHT_HOLD_START at the first IMU timestamp (t0).
+  * Its "value" (type=...) comes from the first slouch movement if available; otherwise it falls back to the
+    first positive beep's movement, else "normal_slouch".
 - Always overwrites outputs placed NEXT TO the IMU file:
     events_inferred_<imu-stem>.csv
     events_debug_<imu-stem>.csv
-- If no schedule is found or a schedule has no beeps, a header-only output is still written.
+- If no schedule is found:
+    We still write an events file with just the initial UPRIGHT_HOLD_START at t0 (and a header-only debug CSV).
 
 Usage:
     python batch_infer_events.py --verbose
@@ -36,7 +40,7 @@ CALM_LEN_S       = 0.18     # seconds of "calm" we require for holds
 RELAX_FACTOR     = 0.70     # relaxed pass multipliers (lower = easier)
 GYRO_STD_STRICT  = 2.0      # baseline_gm + k*std for onset gate
 GYRO_STD_CALM    = 3.0      # baseline_gm + k*std for "calm" during holds
-UPRIGHT_NEAR_DEG = 6.0      # closeness to baseline angle to call upright
+UPRIGHT_NEAR_DEG = 6.0      # closeness to baseline angle to call upright (unused but kept for reference)
 
 # angle thresholds (absolute degrees; sign-agnostic)
 DTHETA_IN = {
@@ -189,7 +193,7 @@ def detect_for_axis(angle, dangle, gyromag, t, fs, i_beep, i0b, i1s,
     need = dtheta_in if strict else dtheta_in * RELAX_FACTOR
     onset_ok = (dtheta >= need)
 
-    # Hold detection (only if onset passed) — fixed off-by-one and minimum length
+    # Hold detection (only if onset passed)
     i_hold = None
     if onset_ok:
         calm_len = max(int(round(CALM_LEN_S * fs)), 3)
@@ -257,6 +261,7 @@ def infer_events_for_session(imu_csv: str, schedule_csv: str, out_csv: str,
     n = min(len(t_sec), len(pitch_s), len(roll_s), len(gyromag))
     t = t_sec[:n]; pitch_s = pitch_s[:n]; roll_s = roll_s[:n]; gyromag = gyromag[:n]
     dpitch = np.gradient(pitch_s, t); droll = np.gradient(roll_s, t)
+    t0 = float(t[0])
 
     # Schedule & alignment
     sch = pd.read_csv(schedule_csv)
@@ -274,16 +279,6 @@ def infer_events_for_session(imu_csv: str, schedule_csv: str, out_csv: str,
 
     # Beeps
     beeps = sch[sch["event"].isin(["BEEP_SLOUCH","BEEP_RECOVER"])].copy()
-    # Always write something; header-only if no beeps
-    if beeps.empty:
-        if verbose: print("[warn] No BEEP_SLOUCH/BEEP_RECOVER in schedule.")
-        os.makedirs(Path(out_csv).parent, exist_ok=True)
-        with open(out_csv, "w", newline="") as f:
-            csv.writer(f).writerow(["t_sec","event","value","confidence"])
-        if WRITE_DEBUG:
-            with open(debug_csv, "w", newline="") as f:
-                csv.writer(f).writerow(["t_beep","event","type","axis_chosen","onset_time","hold_time","onset_score","dtheta","max_pitch","max_roll"])
-        return {"events": 0, "holds_total": 0, "holds_detected": 0, "beeps_in_range": 0, "beeps_total": 0, "shift": shift}
 
     # Count only positives as the denominator (skip hard negatives)
     def movement_type(val: str) -> str:
@@ -295,11 +290,43 @@ def infer_events_for_session(imu_csv: str, schedule_csv: str, out_csv: str,
     beeps_pos = beeps[~beeps["is_neg"]].copy()
     beeps_pos_total = int(beeps_pos.shape[0])
 
+    # Determine movement label to attach to the synthetic initial upright
+    first_slouch_beeps = beeps_pos[beeps_pos["event"] == "BEEP_SLOUCH"].sort_values("t_sec")
+    if not first_slouch_beeps.empty:
+        mv_for_upright = str(first_slouch_beeps["mv"].iloc[0])
+    elif not beeps_pos.empty:
+        mv_for_upright = str(beeps_pos.sort_values("t_sec")["mv"].iloc[0])  # earliest positive beep's movement
+    else:
+        mv_for_upright = "normal_slouch"
+
     def idx(ts): return int(np.searchsorted(t, ts, side="left"))
 
     out_rows = []; dbg_rows = []
     holds_total = 0; holds_detected = 0; beeps_in_range = 0
 
+    # If there are no slouch/recover beeps at all, still write initial upright at t0 and return.
+    if beeps.empty or beeps_pos_total == 0:
+        os.makedirs(Path(out_csv).parent, exist_ok=True)
+        # Always put an upright at t0
+        out_rows.append([t0, "UPRIGHT_HOLD_START", mv_for_upright, 0.0])
+        # Write outputs
+        def _sort_key(r):  # UPRIGHT first if same timestamp
+            return (r[0], 0 if r[1] == "UPRIGHT_HOLD_START" else 1)
+        with open(out_csv, "w", newline="") as f:
+            w = csv.writer(f); w.writerow(["t_sec","event","value","confidence"])
+            for r in sorted(out_rows, key=_sort_key):
+                w.writerow([f"{r[0]:.3f}", r[1], f"type={r[2]}", f"{r[3]:.3f}"])
+        if WRITE_DEBUG:
+            with open(debug_csv, "w", newline="") as f:
+                csv.writer(f).writerow(
+                    ["t_beep","event","type","axis_chosen","onset_time","hold_time","onset_score","dtheta","max_pitch","max_roll"]
+                )
+        if verbose:
+            print("[warn] No usable beeps; wrote initial UPRIGHT_HOLD_START at t0.")
+        return {"events": len(out_rows), "holds_total": holds_total, "holds_detected": holds_detected,
+                "beeps_in_range": beeps_in_range, "beeps_total": beeps_pos_total, "shift": shift}
+
+    # Normal path: detect around beeps
     for _, r in beeps_pos.iterrows():
         ev = str(r["event"]); mv = str(r["mv"])
         t_beep = float(r["t_sec"])
@@ -388,11 +415,22 @@ def infer_events_for_session(imu_csv: str, schedule_csv: str, out_csv: str,
                 dbg_rows.append([t_beep, ev, mv, "fallback",
                                  np.nan, np.nan, 0.0, 0.0, max_pitch, max_roll])
 
+    # --- Ensure an initial upright exactly at t0 -----------------------------
+    # Avoid duplicating if one already sits at t0.
+    already_at_t0 = any((abs(r[0] - t0) <= 1e-9) and (r[1] == "UPRIGHT_HOLD_START") for r in out_rows)
+    if not already_at_t0:
+        out_rows.append([t0, "UPRIGHT_HOLD_START", mv_for_upright, 0.0])
+
     # write outputs (always overwrite)
     os.makedirs(Path(out_csv).parent, exist_ok=True)
+
+    def _sort_key(r):
+        # Sort by time; if same timestamp, make sure UPRIGHT_HOLD_START comes first
+        return (r[0], 0 if r[1] == "UPRIGHT_HOLD_START" else 1)
+
     with open(out_csv, "w", newline="") as f:
         w = csv.writer(f); w.writerow(["t_sec","event","value","confidence"])
-        for r in sorted(out_rows, key=lambda x: x[0]):
+        for r in sorted(out_rows, key=_sort_key):
             w.writerow([f"{r[0]:.3f}", r[1], f"type={r[2]}", f"{r[3]:.3f}"])
 
     if WRITE_DEBUG:
@@ -467,15 +505,31 @@ def find_schedule_for_imu(imu_path: Path, all_schedules: List[Path]) -> Optional
     scored = sorted(candidates, key=lambda p: _schedule_match_score(imu_path, p), reverse=True)
     return scored[0]
 
-def write_empty_outputs(out_csv: str, debug_csv: str, verbose: bool, reason: str):
+def write_upright_only_outputs(imu_csv: str, out_csv: str, debug_csv: str, verbose: bool):
+    """When no schedule is found, still write a single UPRIGHT_HOLD_START at IMU t0."""
+    try:
+        df = pd.read_csv(imu_csv)
+        t_sec, _ = get_time_seconds(df)
+        valid = np.isfinite(t_sec)
+        if valid.sum() == 0:
+            raise RuntimeError("No valid IMU timestamps.")
+        t0 = float(np.sort(t_sec[valid])[0])
+    except Exception as e:
+        # Fall back to t0=0 if something is deeply wrong
+        if verbose:
+            print(f"[warn] Could not read IMU to get t0 ({e}); writing t0=0.000", file=sys.stderr)
+        t0 = 0.0
+
     os.makedirs(Path(out_csv).parent, exist_ok=True)
     with open(out_csv, "w", newline="") as f:
-        csv.writer(f).writerow(["t_sec","event","value","confidence"])
+        w = csv.writer(f); w.writerow(["t_sec","event","value","confidence"])
+        w.writerow([f"{t0:.3f}", "UPRIGHT_HOLD_START", "type=normal_slouch", "0.000"])
+
     if WRITE_DEBUG:
         with open(debug_csv, "w", newline="") as f:
-            csv.writer(f).writerow(["t_beep","event","type","axis_chosen","onset_time","hold_time","onset_score","dtheta","max_pitch","max_roll"])
-    if verbose:
-        print(f"[warn] Wrote header-only outputs ({reason}).")
+            csv.writer(f).writerow(
+                ["t_beep","event","type","axis_chosen","onset_time","hold_time","onset_score","dtheta","max_pitch","max_roll"]
+            )
 
 # ---------- Batch driver ----------
 def main():
@@ -507,9 +561,10 @@ def main():
 
         sch_path = find_schedule_for_imu(imu_path, all_schedules)
         if sch_path is None:
-            print(f"[skip] No schedule CSV found for {imu_path.relative_to(root)}")
-            write_empty_outputs(out_csv, debug_csv, args.verbose, reason="no_schedule")
-            summary.append((str(imu_path.relative_to(root)), 0, 0, 0, 0, 0, 0.0, False))
+            print(f"[run] {imu_path.relative_to(root)}  SCHED=<none>  -> {Path(out_csv).name} (upright@t0 only)")
+            write_upright_only_outputs(imu_csv, out_csv, debug_csv, args.verbose)
+            # Record minimal summary
+            summary.append((str(imu_path.relative_to(root)), 1, 0, 0, 0, 0, 0.0, True))
             continue
 
         schedule_csv = str(sch_path)
@@ -521,8 +576,9 @@ def main():
         except Exception as e:
             ok = False
             print(f"[fail] {imu_path.name}: {e}", file=sys.stderr)
-            write_empty_outputs(out_csv, debug_csv, args.verbose, reason="exception")
-            stats = {"events":0,"holds_total":0,"holds_detected":0,"beeps_in_range":0,"beeps_total":0,"shift":0.0}
+            # As a fallback on error, still produce an upright-only file so downstream doesn't break
+            write_upright_only_outputs(imu_csv, out_csv, debug_csv, args.verbose)
+            stats = {"events":1,"holds_total":0,"holds_detected":0,"beeps_in_range":0,"beeps_total":0,"shift":0.0}
 
         summary.append((
             str(imu_path.relative_to(root)),

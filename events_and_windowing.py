@@ -304,13 +304,13 @@ def edit_csv():
             # --- add/refresh derived columns (idempotent) ---
             add_pitch_to_df(df_imu)  # modifies df_imu in place
             fix_length(df_imu, target_len=18_000)
-            normalize_chanels(df_imu)
+            #normalize_chanels(df_imu)
 
             try:
                 df_imu.to_csv(csv_path, index=False)
             except Exception as e:
                 print(f"❌ Failed to write: {csv_path}\n   ↳ {e}")
-                
+
 def find_shapes():
     # pick the first IMU file under data/*/
     DATA_ROOT = os.path.join(os.getcwd(), "data")
@@ -349,7 +349,6 @@ def X_and_y(type):
         if not os.path.isdir(folder_path):
             continue
 
-        #event_files = glob.glob(os.path.join(folder_path, 'events_inferred_template_*.csv'))
         event_files = glob.glob(os.path.join(folder_path, 'events_inferred_*.csv'))
         imu_files   = glob.glob(os.path.join(folder_path, 'airpods_motion_*.csv'))
         if not event_files or not imu_files:

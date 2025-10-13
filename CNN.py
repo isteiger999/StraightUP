@@ -1,3 +1,6 @@
+from constants import set_seeds, configure_tensorflow
+set_seeds()
+configure_tensorflow()
 import tensorflow as tf
 from tensorflow.keras import layers, models, regularizers
 from sklearn.utils.class_weight import compute_class_weight
@@ -67,7 +70,7 @@ def CNN_model(X_train, y_train, X_val, y_val, n_classes=3):
     # Per-feature normalization (fit on train only)
     norm = layers.Normalization(axis=-1)
     norm.adapt(X_train.astype("float32"))
-
+    
     # used to be: 32, 64, 96
     cnn = models.Sequential([
         layers.Input(shape=(T, n_ch)),
@@ -95,6 +98,8 @@ def CNN_model(X_train, y_train, X_val, y_val, n_classes=3):
         #loss = tf.keras.losses.SparseCategoricalCrossentropy(label_smoothing=0.05),
         metrics=["accuracy", BalancedAccuracy(n_classes=3)]
     )
+    
+    ############### HIER WEITER ###################
 
     monitor = "val_balanced_acc"  # ✅ matches the metric name above
     callbacks = [

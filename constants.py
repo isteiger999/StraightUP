@@ -1,3 +1,25 @@
+import os
+os.environ["PYTHONHASHSEED"] = "42"
+os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
+
+import random
+import numpy as np
+import tensorflow as tf
+
+def set_seeds(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    tf.random.set_seed(seed)
+    
+def configure_tensorflow():
+    # For additional TensorFlow reproducibility
+    tf.config.threading.set_inter_op_parallelism_threads(1)
+    tf.config.threading.set_intra_op_parallelism_threads(1)
+
+# Import this in EVERY script that needs reproducibility
+set_seeds()
+configure_tensorflow()
+
 FEATURE_ORDER = [
     "quat_x","quat_y","quat_z","quat_w",
     "rot_x","rot_y","rot_z",

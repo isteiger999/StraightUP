@@ -44,7 +44,7 @@ class BalancedAccuracy(tf.keras.metrics.Metric):
         denom = tf.reduce_sum(mask)
         return tf.where(denom > 0, tf.reduce_sum(recalls * mask) / denom, tf.constant(0.0, dtype=self.dtype))
 
-    def reset_states(self):
+    def reset_state(self):
         tf.keras.backend.batch_set_value([(self.tp, np.zeros(self.n_classes, dtype=np.float32)),
                                           (self.pos, np.zeros(self.n_classes, dtype=np.float32))])
 
@@ -82,7 +82,7 @@ def blocks_for_full_rf(seq_len, k, max_blocks=12):
 # ---------- Train/Eval wrapper ----------
 def train_eval_tcn(X_train, y_train, X_val, y_val, verbose,
                    *, kernel_size=5, base_filters=96, dropout=0.10, l2=1e-4,
-                   batch_size=64, max_epochs=1000, n_classes=3, lr=1e-3):
+                   batch_size=64, max_epochs=1000, n_classes=3, lr=5e-4):
     tf.keras.utils.set_random_seed(42)
 
     # Shapes & dtypes
@@ -114,7 +114,7 @@ def train_eval_tcn(X_train, y_train, X_val, y_val, verbose,
 
     model = models.Model(x_in, y)
     model.compile(
-        optimizer=Adam(lr),
+        optimizer=tf.keras.optimizers.legacy.Adam(lr),
         loss="sparse_categorical_crossentropy",
         metrics=["accuracy", BalancedAccuracy(n_classes=n_classes, name="balanced_acc")]
     )

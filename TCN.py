@@ -136,13 +136,17 @@ def train_eval_tcn(X_train, y_train, X_val, y_val, verbose,
     if valid.size:
         cw = compute_class_weight('balanced', classes=valid, y=y_train.ravel())
         class_weight = {int(c): float(w) for c, w in zip(valid, cw)}
+    
+    shuffle_idx = np.random.permutation(len(X_train))
+    X_train_shuffled = X_train[shuffle_idx]
+    y_train_shuffled = y_train[shuffle_idx]
 
     model.fit(
-        X_train, y_train,
+        X_train_shuffled, y_train_shuffled,
         validation_data=(X_val, y_val),
         epochs=max_epochs,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=False,
         callbacks=callbacks,
         verbose=verbose,
         class_weight=class_weight

@@ -90,21 +90,15 @@ def CNN_model(X_train, y_train, X_val, y_val, n_classes=3):
         layers.Dropout(0.20),
         layers.Dense(n_classes, activation="softmax")   # 3 logits -> probs
     ])
-
+    ## These metrices are then shown in the cnn.eval on X_val and y_val
     cnn.compile(
         loss="sparse_categorical_crossentropy",
-        #optimizer  = tf.keras.optimizers.AdamW(learning_rate=3e-4, weight_decay=1e-4),
-        optimizer=tf.keras.optimizers.Adam(1e-3),
-        #loss = tf.keras.losses.SparseCategoricalCrossentropy(label_smoothing=0.05),
+        optimizer=tf.keras.optimizers.Adam(5e-4),
         metrics=["accuracy", BalancedAccuracy(n_classes=3)]
     )
     
-    ############### HIER WEITER ###################
-
     monitor = "val_balanced_acc"  # ✅ matches the metric name above
     callbacks = [
-        #tf.keras.callbacks.ModelCheckpoint("best_by_metric.keras", monitor=monitor,
-        #                                mode="max", save_best_only=False),
         tf.keras.callbacks.EarlyStopping(monitor=monitor, mode="max",
                                         patience=15, restore_best_weights=True),
         tf.keras.callbacks.ReduceLROnPlateau(monitor=monitor, mode="max",
@@ -118,13 +112,17 @@ def CNN_model(X_train, y_train, X_val, y_val, n_classes=3):
     if valid.size:
         cw = compute_class_weight('balanced', classes=valid, y=y_train.ravel())
         class_weight = {int(c): float(w) for c, w in zip(valid, cw)}
+    
+    shuffle_idx = np.random.permutation(len(X_train))
+    X_train_shuffled = X_train[shuffle_idx]
+    y_train_shuffled = y_train[shuffle_idx]
 
     cnn.fit(
-        X_train, y_train,
+        X_train_shuffled, y_train_shuffled,
         validation_data=(X_val, y_val),
         epochs=200,
         batch_size=64,
-        shuffle=True,
+        shuffle=False,
         callbacks=callbacks,
         verbose=1,
         class_weight=class_weight

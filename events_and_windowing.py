@@ -52,46 +52,6 @@ def count_all_zero_windows(X):
         print("indices:", idxs.tolist())
     return count, idxs
 
-def label_at_time(t, names, times, m):
-    """Return 0=upright, 1=transition, 2=slouched at time t, with margin m."""
-    # find prev and next event indices
-    k = int(np.searchsorted(times, t, side='right')) - 1
-    if k < 0:
-        # before first event: upright, unless within m of first SLOUCH_START
-        if names[0] == 'SLOUCH_START' and t >= times[0] - m:
-            return 1
-        return 0
-    prev_ev, prev_t = names[k], times[k]
-    next_ev = names[k+1] if k + 1 < len(names) else None
-    next_t = times[k+1] if k + 1 < len(times) else np.inf
-
-    # intervals with margin logic
-    if prev_ev == 'UPRIGHT_HOLD_START':
-        # upright until slouch_start - m; then transition
-        if next_ev == 'SLOUCH_START' and t >= next_t - m:
-            return 1
-        # also treat just after a fresh upright as transition for m
-        if t < prev_t + m:
-            return 1
-        return 0
-
-    if prev_ev == 'SLOUCH_START':
-        # transition until slouched_hold (+m handled in next segment)
-        return 1
-
-    if prev_ev == 'SLOUCHED_HOLD_START':
-        # transition for m after hold, then slouched
-        if t < prev_t + m:
-            return 1
-        # slouched until recovery - m (handled by recovery segment)
-        return 2
-
-    if prev_ev == 'RECOVERY_START':
-        # transition until next upright (+m after upright handled above)
-        return 1
-
-    # default fallback
-    return 0
 
 def count_labels(y, labels=(0, 1, 2), verbose=True):
     y = np.asarray(y).ravel().astype(int)
@@ -510,6 +470,63 @@ def edit_csv():
             except Exception as e:
                 print(f"❌ Failed to write: {csv_path}\n   ↳ {e}")
 
+def label_at_time(t, names, times, m):
+    """
+    3-class labeling at timestamp t with margin m (seconds).
+
+    Emits transition (1) **only** for the slouch cycle:
+      UPRIGHT_HOLD_START  --(near next SLOUCH_START - m)-->  1
+      SLOUCH_START                                       --> 1
+      SLOUCHED_HOLD_START (first m sec)                  --> 1
+      SLOUCHED_HOLD_START (after  m sec)                 --> 2
+      RECOVERY_START *if recovering from a slouch hold*  --> 1
+
+    Non-slouch events ('NOSLOUCH_START', 'NOSLOUCHED_HOLD_START') never
+    yield transition or slouched; they are treated as upright (0).
+    """
+    # index of the last event at or before t
+    k = int(np.searchsorted(times, t, side='right')) - 1
+
+    # before first event: only treat as transition if first event is SLOUCH_START
+    if k < 0:
+        if len(names) and names[0] == 'SLOUCH_START' and t >= times[0] - m:
+            return 1
+        return 0
+
+    prev_ev, prev_t = names[k], times[k]
+    next_ev = names[k+1] if (k + 1) < len(names) else None
+    next_t  = times[k+1]  if (k + 1) < len(times) else np.inf
+    prev_prev_ev = names[k-1] if (k - 1) >= 0 else None
+
+    # ---- Non-slouch events are always upright ----
+    if prev_ev in ('NOSLOUCH_START', 'NOSLOUCHED_HOLD_START'):
+        return 0
+
+    # ---- Slouch-cycle labeling ----
+    if prev_ev == 'UPRIGHT_HOLD_START':
+        # Only near an upcoming true SLOUCH_START do we call transition
+        if next_ev == 'SLOUCH_START' and t >= next_t - m:
+            return 1
+        return 0
+
+    if prev_ev == 'SLOUCH_START':
+        return 1
+
+    if prev_ev == 'SLOUCHED_HOLD_START':
+        # transition for m right after entering slouched, then slouched
+        if t < prev_t + m:
+            return 1
+        return 2
+
+    if prev_ev == 'RECOVERY_START':
+        # Transition only if we are recovering from a real slouch hold
+        if prev_prev_ev == 'SLOUCHED_HOLD_START':
+            return 1
+        return 0
+
+    # default
+    return 0
+
 def find_shapes():
     # pick the first IMU file under data/*/
     DATA_ROOT = os.path.join(os.getcwd(), "data")
@@ -535,7 +552,6 @@ def find_shapes():
     windows_per_rec = max(0, 1 + (N - win_len_frames) // stride_frames)
 
     return t, dt_med, fs, win_len_frames, stride_frames, N, windows_per_rec, stride, len_window_sec
-
 
 
 def X_and_y(type):
@@ -580,11 +596,27 @@ def X_and_y(type):
         names = ev['event'].astype(str).tolist()
         
         # --- Labels: state at window END on IMU axis ---
+        '''
+        WORK ON THIS LATER TO LABEL 'TRANSITION' RIGHT
+        m = 0.2
+        labels_array = np.zeros((windows_per_rec, 1), dtype=int)
+        for i in range(windows_per_rec):
+            t_end   = t0 + len_window_sec + i * stride
+            t_start = t_end - len_window_sec
+            labels_array[i, 0] = label_window_interval_centered(
+                t_start, t_end, names, times, m,
+                n_samples=win_len_frames,      # 75 for your setup
+                center_band=(0.4, 0.6),      # only count transitions near the middle
+                min_total_trans_frac=0.12,     # ~9/75 frames
+                min_center_trans_frac=0.08     # ~6/75 frames
+            )
+        '''
         m = 0.2
         labels_array = np.zeros((windows_per_rec, 1), dtype=int)
         for i in range(windows_per_rec):
             current_time = t0 + len_window_sec + i * stride
             labels_array[i, 0] = label_at_time(current_time, names, times, m)
+        
         y_tot[index*windows_per_rec:(index+1)*windows_per_rec, 0:1] = labels_array
 
         # --- Features: drop the time column by position (your current approach) ---

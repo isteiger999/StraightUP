@@ -40,13 +40,13 @@ def main():
     plt.legend()
     plt.show()
     '''
-    '''
-    plt.plot(np.arange(718), y_train[:718])
+    
+    plt.plot(np.arange(718), y_train[0*718:1*718])   # 1*718:2*718
     plt.ylabel("label")
     plt.xlabel("Time")
     plt.legend()
     plt.show()
-    '''
+    
     
     # 3. Create & train CNN --> then evaluate
     cnn = CNN_model(X_train, y_train, X_val, y_val)

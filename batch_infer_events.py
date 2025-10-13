@@ -9,12 +9,18 @@ Behavior:
 - Runs a 2-pass axis-adaptive detection (strict then relaxed).
 - ALWAYS seeds an initial UPRIGHT_HOLD_START at the first IMU timestamp (t0).
   * Its "value" (type=...) comes from the first slouch movement if available; otherwise it falls back to the
-    first positive beep's movement, else "normal_slouch".
+    earliest positive beep movement, else "normal_slouch".
 - Always overwrites outputs placed NEXT TO the IMU file:
     events_inferred_<imu-stem>.csv
     events_debug_<imu-stem>.csv
 - If no schedule is found:
     We still write an events file with just the initial UPRIGHT_HOLD_START at t0 (and a header-only debug CSV).
+
+**This version infers all 8 movements. For the five non-slouch movements
+(lateral_left, lateral_right, neck_only, reach_left, reach_right) it renames:**
+    SLOUCH_START            -> NOSLOUCH_START
+    SLOUCHED_HOLD_START     -> NOSLOUCHED_HOLD_START
+Recovery events remain RECOVERY_START and UPRIGHT_HOLD_START.
 
 Usage:
     python batch_infer_events.py --verbose
@@ -28,6 +34,10 @@ import numpy as np
 import pandas as pd
 
 RAD2DEG = 180.0 / math.pi
+
+# ====== Movement sets =======================================================
+SLOUCH_MOVES   = {"normal_slouch", "fast_slouch", "micro_slouch"}
+NOSLOUCH_MOVES = {"lateral_left", "lateral_right", "neck_only", "reach_left", "reach_right"}
 
 # ====== Tunables ============================================================
 # windows / gates
@@ -44,9 +54,9 @@ UPRIGHT_NEAR_DEG = 6.0      # closeness to baseline angle to call upright (unuse
 
 # angle thresholds (absolute degrees; sign-agnostic)
 DTHETA_IN = {
-    "roll":         3.5,    # lateral (left/right)
-    "pitch_micro":  2.0,    # micro slouch
-    "pitch":        6.0,    # normal slouch
+    "roll":         3.5,    # lateral / reach (left/right)
+    "pitch_micro":  2.0,    # micro slouch / neck-only
+    "pitch":        6.0,    # normal slouch / reach if pitch-dominant
     "pitch_fast":   5.0,    # fast slouch
 }
 THETA_HOLD = {
@@ -63,6 +73,9 @@ FALLBACK_OFFSETS = {
     "micro_slouch":  (0.60, 1.00),
     "lateral_left":  (0.45, 0.90),
     "lateral_right": (0.45, 0.90),
+    "neck_only":     (0.35, 0.80),  # generally quicker & smaller
+    "reach_left":    (0.45, 0.90),
+    "reach_right":   (0.45, 0.90),
 }
 
 WRITE_DEBUG = True  # set False to stop writing events_debug_*.csv
@@ -280,18 +293,21 @@ def infer_events_for_session(imu_csv: str, schedule_csv: str, out_csv: str,
     # Beeps
     beeps = sch[sch["event"].isin(["BEEP_SLOUCH","BEEP_RECOVER"])].copy()
 
-    # Count only positives as the denominator (skip hard negatives)
+    # Extract movement name
     def movement_type(val: str) -> str:
         return val.split("type=",1)[1] if "type=" in val else val
 
-    hard_negs = {"neck_only","reach_left","reach_right","reach","twist"}
     beeps["mv"] = beeps["value"].astype(str).apply(movement_type)
+
+    # Include ALL 8 movements (no hard-negatives here). If your schedule ever carries
+    # truly irrelevant tags (e.g. "twist"), filter them explicitly:
+    hard_negs = {"twist"}  # << keep only if such labels appear in your data
     beeps["is_neg"] = beeps["mv"].isin(hard_negs)
     beeps_pos = beeps[~beeps["is_neg"]].copy()
     beeps_pos_total = int(beeps_pos.shape[0])
 
     # Determine movement label to attach to the synthetic initial upright
-    first_slouch_beeps = beeps_pos[beeps_pos["event"] == "BEEP_SLOUCH"].sort_values("t_sec")
+    first_slouch_beeps = beeps_pos[(beeps_pos["event"] == "BEEP_SLOUCH") & (beeps_pos["mv"].isin(SLOUCH_MOVES))].sort_values("t_sec")
     if not first_slouch_beeps.empty:
         mv_for_upright = str(first_slouch_beeps["mv"].iloc[0])
     elif not beeps_pos.empty:
@@ -301,15 +317,19 @@ def infer_events_for_session(imu_csv: str, schedule_csv: str, out_csv: str,
 
     def idx(ts): return int(np.searchsorted(t, ts, side="left"))
 
+    def start_event_for(mv: str) -> str:
+        return "SLOUCH_START" if mv in SLOUCH_MOVES else "NOSLOUCH_START"
+
+    def hold_event_for(mv: str) -> str:
+        return "SLOUCHED_HOLD_START" if mv in SLOUCH_MOVES else "NOSLOUCHED_HOLD_START"
+
     out_rows = []; dbg_rows = []
     holds_total = 0; holds_detected = 0; beeps_in_range = 0
 
-    # If there are no slouch/recover beeps at all, still write initial upright at t0 and return.
+    # If there are no beeps at all, still write initial upright at t0 and return.
     if beeps.empty or beeps_pos_total == 0:
         os.makedirs(Path(out_csv).parent, exist_ok=True)
-        # Always put an upright at t0
         out_rows.append([t0, "UPRIGHT_HOLD_START", mv_for_upright, 0.0])
-        # Write outputs
         def _sort_key(r):  # UPRIGHT first if same timestamp
             return (r[0], 0 if r[1] == "UPRIGHT_HOLD_START" else 1)
         with open(out_csv, "w", newline="") as f:
@@ -335,8 +355,8 @@ def infer_events_for_session(imu_csv: str, schedule_csv: str, out_csv: str,
             continue
         beeps_in_range += 1
 
-        # thresholds by axis/mode
-        if "micro" in mv:
+        # thresholds by axis/mode (pitch side depends on movement)
+        if "micro" in mv or ("neck" in mv):
             need_pitch = ("pitch_micro", DTHETA_IN["pitch_micro"], THETA_HOLD["pitch_micro"])
         elif "fast" in mv:
             need_pitch = ("pitch_fast", DTHETA_IN["pitch_fast"], THETA_HOLD["pitch_fast"])
@@ -372,7 +392,10 @@ def infer_events_for_session(imu_csv: str, schedule_csv: str, out_csv: str,
             conf_on = float((gyromag[i_on]-cand["base_gm"]) / (cand["std_gm"] if cand["std_gm"]>1e-6 else 1.0))
 
             if ev == "BEEP_SLOUCH":
-                out_rows.append([t[i_on], "SLOUCH_START", mv, conf_on])
+                start_evt = start_event_for(mv)
+                hold_evt  = hold_event_for(mv)
+                out_rows.append([t[i_on], start_evt, mv, conf_on])
+
                 # hold: detected or fallback aligned to onset spacing
                 if cand["hold_idx"] is not None:
                     hold_time = t[cand["hold_idx"]]; hold_conf = float(cand["dtheta"])
@@ -381,10 +404,10 @@ def infer_events_for_session(imu_csv: str, schedule_csv: str, out_csv: str,
                     d_on, d_hold = FALLBACK_OFFSETS.get(mv, (0.45, 0.90))
                     hold_time = t[i_on] + (d_hold - d_on); hold_conf = 0.0
                     used_fallback = True
-                out_rows.append([hold_time, "SLOUCHED_HOLD_START", mv, hold_conf])
+                out_rows.append([hold_time, hold_evt, mv, hold_conf])
                 holds_total += 1
 
-            else:  # RECOVER
+            else:  # BEEP_RECOVER
                 out_rows.append([t[i_on], "RECOVERY_START", mv, conf_on])
                 if cand["hold_idx"] is not None:
                     hold_time = t[cand["hold_idx"]]; hold_conf = float(cand["dtheta"])  # unified semantics
@@ -405,11 +428,13 @@ def infer_events_for_session(imu_csv: str, schedule_csv: str, out_csv: str,
             # ---- Fallback: synthesize both events from beep ----
             d_on, d_hold = FALLBACK_OFFSETS.get(mv, (0.45, 0.90))
             if ev == "BEEP_SLOUCH":
-                out_rows.append([t_beep + d_on,   "SLOUCH_START",         mv, 0.0])
-                out_rows.append([t_beep + d_hold, "SLOUCHED_HOLD_START",  mv, 0.0])
+                start_evt = start_event_for(mv)
+                hold_evt  = hold_event_for(mv)
+                out_rows.append([t_beep + d_on,   start_evt, mv, 0.0])
+                out_rows.append([t_beep + d_hold, hold_evt,  mv, 0.0])
             else:
-                out_rows.append([t_beep + d_on,   "RECOVERY_START",       mv, 0.0])
-                out_rows.append([t_beep + d_hold, "UPRIGHT_HOLD_START",   mv, 0.0])
+                out_rows.append([t_beep + d_on,   "RECOVERY_START",     mv, 0.0])
+                out_rows.append([t_beep + d_hold, "UPRIGHT_HOLD_START", mv, 0.0])
             holds_total += 1
             if WRITE_DEBUG:
                 dbg_rows.append([t_beep, ev, mv, "fallback",

@@ -22,6 +22,8 @@ def main():
     n = len(combinations)
     print(combinations)
 
+    edit_csv()
+
     for index, (_, list_comb) in enumerate(sorted(combinations.items(), key=lambda kv: int(kv[0]))):
 
         # 1. Create non-overlapping datasets

@@ -1,18 +1,27 @@
+from constants import set_seeds, configure_tensorflow
+set_seeds()
+configure_tensorflow()
 import pandas as pd
 import numpy as np
 import random
 import glob
 import os
+from itertools import permutations, islice
+from math import factorial, floor
+from typing import List, Dict, Tuple
+import random
 
 
 # count number of beep_schedules_folders:
-def folders_tot(type):
+def folders_tot(type, list_comb):
     if type == 'train':
-        endings = ('0', '1')
+        endings = tuple(list_comb[:-2])  # All except last two
     elif type == 'val':
-        endings = ('2',)
+        nr = list_comb[-2]
+        endings = (nr,)
     elif type == 'test':
-        endings = ('3',)
+        nr = list_comb[-1]
+        endings = (nr,)
     else:
         raise ValueError("Invalid type. Choose 'train', 'val', or 'test'.")
 
@@ -23,7 +32,7 @@ def folders_tot(type):
         # Build the pattern using an f-string to insert the current ending
         # Example: 'beep_schedules_*0'
         DATA_ROOT = os.path.join(os.getcwd(), "data")
-        pattern = os.path.join(DATA_ROOT, f'beep_schedules_*{ending}')
+        pattern = os.path.join(DATA_ROOT, f'beep_schedules_{ending}*')
         
         # Find all paths matching the specific pattern
         current_matches = glob.glob(pattern)
@@ -51,7 +60,6 @@ def count_all_zero_windows(X):
     if count:
         print("indices:", idxs.tolist())
     return count, idxs
-
 
 def count_labels(y, labels=(0, 1, 2), verbose=True):
     y = np.asarray(y).ravel().astype(int)
@@ -243,7 +251,6 @@ def add_roll_to_df(df_imu, out_col="roll_rad",
     df_imu.insert(insert_at, out_col, roll)
     return df_imu
 
-
 def add_yaw_to_df(df_imu, out_col="yaw_rad",
                   quat_cols=("quat_x","quat_y","quat_z","quat_w")):
     """
@@ -303,7 +310,45 @@ def add_yaw_to_df(df_imu, out_col="yaw_rad",
     df_imu.insert(insert_at, out_col, yaw)
     return df_imu
 
+def find_combinations(names: List[str], fraction: float = 1.0) -> Tuple[Dict[int, List[str]], Dict[str, float], Dict[str, float]]:
+    if not 0.0 <= fraction <= 1.0:
+        raise ValueError("fraction must be between 0 and 1 inclusive.")
 
+    # De-duplicate while preserving order
+    seen = set()
+    unique: List[str] = []
+    for name in names:
+        if name not in seen:
+            seen.add(name)
+            unique.append(name)
+
+    n = len(unique)
+    total = factorial(n)
+    k = floor(total * fraction)
+
+    combinations: Dict[int, List[str]] = {}
+    if k:
+        sampled_ranks = random.sample(range(total), k)  # uniform, no replacement
+        perms: List[List[str]] = []
+        for r in sampled_ranks:
+            # Inline unranking (factorial number system)
+            pool = unique[:]          # working copy
+            perm: List[str] = []
+            for m in range(n, 0, -1):
+                f = factorial(m - 1)
+                idx = r // f
+                r = r % f
+                perm.append(pool.pop(idx))
+            perms.append(perm)
+
+        # Randomize display order of the sampled permutations
+        random.shuffle(perms)
+        combinations = {i: p for i, p in enumerate(perms)}
+
+    mean = {"loss": 0, "balanced_acc": 0}
+    std = {"loss": 0, "balanced_acc": 0}
+
+    return combinations, mean, std
 
 def fix_length(df_imu: pd.DataFrame, target_len: int = 18_000,
                time_col_idx: int = 0, fs_hint: float = 50.0) -> None:
@@ -554,9 +599,10 @@ def find_shapes():
     return t, dt_med, fs, win_len_frames, stride_frames, N, windows_per_rec, stride, len_window_sec
 
 
-def X_and_y(type):
-    matching_folders, n_folders = folders_tot(type)
+def X_and_y(type, list_comb):
+    matching_folders, n_folders = folders_tot(type, list_comb)
     _, _, _, win_len_frames, stride_frames, _, windows_per_rec, stride, len_window_sec = find_shapes()
+    
     X_tot = None
     y_tot = np.zeros((n_folders * windows_per_rec, 1), dtype=int)
 

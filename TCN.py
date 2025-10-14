@@ -81,8 +81,8 @@ def blocks_for_full_rf(seq_len, k, max_blocks=12):
 
 # ---------- Train/Eval wrapper ----------
 def train_eval_tcn(X_train, y_train, X_val, y_val, verbose,
-                   *, kernel_size=5, base_filters=96, dropout=0.10, l2=1e-4,
-                   batch_size=64, max_epochs=1000, n_classes=3, lr=5e-4):
+                   *, kernel_size=5, base_filters=96, dropout=0.10, l2=8e-4,
+                   batch_size=64, max_epochs=1000, n_classes=3):
     tf.keras.utils.set_random_seed(42)
 
     # Shapes & dtypes
@@ -114,9 +114,9 @@ def train_eval_tcn(X_train, y_train, X_val, y_val, verbose,
 
     model = models.Model(x_in, y)
     model.compile(
-        optimizer=tf.keras.optimizers.legacy.Adam(lr),
+        optimizer=tf.keras.optimizers.legacy.Adam(5e-4),
         loss="sparse_categorical_crossentropy",
-        metrics=["accuracy", BalancedAccuracy(n_classes=n_classes, name="balanced_acc")]
+        metrics=[BalancedAccuracy(n_classes=n_classes, name="balanced_acc")]    # "accuracy", 
     )
 
     monitor = "val_balanced_acc"   # we want to MAXIMIZE this

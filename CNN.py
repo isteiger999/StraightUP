@@ -55,7 +55,7 @@ class BalancedAccuracy(tf.keras.metrics.Metric):
             v.assign(tf.zeros_like(v))
 
 
-def CNN_model(X_train, y_train, X_val, y_val, n_classes=3):
+def CNN_model(X_train, y_train, X_val, y_val, verbose, n_classes=3):
     T = X_train.shape[1]
     n_ch = X_train.shape[2]
     assert X_train.ndim == 3 and X_train.shape[1:] == (75, n_ch)
@@ -94,7 +94,7 @@ def CNN_model(X_train, y_train, X_val, y_val, n_classes=3):
     cnn.compile(
         loss="sparse_categorical_crossentropy",
         optimizer=tf.keras.optimizers.legacy.Adam(5e-4), 
-        metrics=["accuracy", BalancedAccuracy(n_classes=3)]
+        metrics=[BalancedAccuracy(n_classes=3)]             # removed "accuracy" (14. October 2025)
     )
     
     monitor = "val_balanced_acc"  # ✅ matches the metric name above
@@ -124,7 +124,7 @@ def CNN_model(X_train, y_train, X_val, y_val, n_classes=3):
         batch_size=64,
         shuffle=False,
         callbacks=callbacks,
-        verbose=1,
+        verbose=verbose,
         class_weight=class_weight
     )
 

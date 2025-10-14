@@ -5,6 +5,42 @@ os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 import random
 import numpy as np
 import tensorflow as tf
+import platform
+
+def configure_tensorflow_gpu(prefer_gpu: bool = True):
+    """
+    - On macOS with tensorflow-metal installed: uses the Apple GPU.
+    - On other systems with CUDA GPUs: enables memory growth.
+    - Otherwise: disables GPU and runs on CPU.
+    You can override with env var PREFER_GPU=0 to force CPU.
+    """
+    prefer_gpu = prefer_gpu and os.getenv("PREFER_GPU", "1") == "1"
+
+    try:
+        gpus = tf.config.list_physical_devices("GPU")
+        if prefer_gpu and gpus:
+            # CUDA-specific nicety (not needed on Apple Metal)
+            if platform.system() != "Darwin":
+                for gpu in gpus:
+                    try:
+                        tf.config.experimental.set_memory_growth(gpu, True)
+                    except Exception:
+                        pass
+            print(f"[TF] Using GPU ({'Metal' if platform.system()=='Darwin' else 'CUDA'}), {len(gpus)} device(s) found.")
+        else:
+            # Explicitly hide GPUs (or none present)
+            try:
+                tf.config.set_visible_devices([], "GPU")
+            except Exception:
+                pass
+            print("[TF] Using CPU (GPU unavailable or disabled).")
+    except Exception as e:
+        # Any failure → fall back to CPU
+        try:
+            tf.config.set_visible_devices([], "GPU")
+        except Exception:
+            pass
+        print(f"[TF] Falling back to CPU due to config error: {e}")
 
 def set_seeds(seed=42):
     random.seed(seed)
@@ -16,9 +52,7 @@ def configure_tensorflow():
     tf.config.threading.set_inter_op_parallelism_threads(1)
     tf.config.threading.set_intra_op_parallelism_threads(1)
 
-# Import this in EVERY script that needs reproducibility
-set_seeds()
-configure_tensorflow()
+
 
 FEATURE_ORDER = [
     "quat_x","quat_y","quat_z","quat_w",

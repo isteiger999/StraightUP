@@ -75,13 +75,13 @@ def CNN_model(X_train, y_train, X_val, y_val, n_classes=3):
     cnn = models.Sequential([
         layers.Input(shape=(T, n_ch)),
         norm,
-        layers.Conv1D(16, 11, padding="causal", activation="relu", kernel_regularizer=l2),
+        layers.Conv1D(24, 9, padding="causal", activation="relu", kernel_regularizer=l2),
         layers.MaxPooling1D(2),
 
-        layers.Conv1D(32, 9,  padding="causal", activation="relu", kernel_regularizer=l2),
+        layers.Conv1D(48, 7,  padding="causal", activation="relu", kernel_regularizer=l2),
         layers.MaxPooling1D(2),
 
-        layers.Conv1D(64, 7,  padding="causal", activation="relu", kernel_regularizer=l2),
+        layers.Conv1D(96, 5,  padding="causal", activation="relu", kernel_regularizer=l2),
         layers.MaxPooling1D(2),
         
         layers.GlobalAveragePooling1D(),
@@ -93,7 +93,7 @@ def CNN_model(X_train, y_train, X_val, y_val, n_classes=3):
     ## These metrices are then shown in the cnn.eval on X_val and y_val
     cnn.compile(
         loss="sparse_categorical_crossentropy",
-        optimizer=tf.keras.optimizers.Adam(5e-4),
+        optimizer=tf.keras.optimizers.legacy.Adam(5e-4), 
         metrics=["accuracy", BalancedAccuracy(n_classes=3)]
     )
     

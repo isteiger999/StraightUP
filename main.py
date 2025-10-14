@@ -45,9 +45,9 @@ def main():
     plt.ylabel("label")
     plt.xlabel("Time")
     plt.legend()
-    plt.show()
+    #plt.show()
     
-    '''
+    
     # 3. Create & train CNN --> then evaluate
     cnn = CNN_model(X_train, y_train, X_val, y_val)
     print("CNN Eval Score:")
@@ -60,7 +60,7 @@ def main():
     print("TCN Eval Score:")
     TCN_model.evaluate(X_test, y_test)
     print("Done evaluating")
-    
+    '''
 
 if __name__ == '__main__':
     main()

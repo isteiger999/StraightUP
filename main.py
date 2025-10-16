@@ -17,7 +17,7 @@ warnings.filterwarnings("ignore", category=NotOpenSSLWarning)
 
 def main():
     print("Physical GPUs:", tf.config.list_physical_devices('GPU'))
-    participants = ['Ivan', 'Dario', 'David', 'Mohid',]         # 'Ivaan',
+    participants = ['Ivan', 'Dario', 'David', 'Mohid', 'Claire']         # 'Ivaan', 'Claire'
     combinations, mean, std = find_combinations(participants, fraction = 1)  # fraction 0.1 means cut off  
     n = len(combinations)
     print(combinations)

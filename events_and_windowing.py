@@ -310,7 +310,21 @@ def add_yaw_to_df(df_imu, out_col="yaw_rad",
     df_imu.insert(insert_at, out_col, yaw)
     return df_imu
 
-def find_combinations(names: List[str], fraction: float = 1.0) -> Tuple[Dict[int, List[str]], Dict[str, float], Dict[str, float]]:
+def find_combinations(names: List[str], fraction: float = 1.0) -> Tuple[Dict[int, List[str]],
+                                                                        Dict[str, float],
+                                                                        Dict[str, float]]:
+    """
+    Build permutations where:
+      - First n-2 items are the TRAIN split (order canonicalized to the original 'names' order)
+      - (n-1)th is VAL
+      - nth is TEST
+
+    Canonicalizing the training portion ensures that once a particular set of n-2 names has been
+    used in the first n-2 positions, it will not appear again in another order.
+
+    Universe size: n * (n - 1)  (all ordered (val, test) pairs), rather than n!.
+    'fraction' is applied to this universe.
+    """
     if not 0.0 <= fraction <= 1.0:
         raise ValueError("fraction must be between 0 and 1 inclusive.")
 
@@ -323,31 +337,42 @@ def find_combinations(names: List[str], fraction: float = 1.0) -> Tuple[Dict[int
             unique.append(name)
 
     n = len(unique)
-    total = factorial(n)
+    # Edge cases: not enough names to form val/test
+    if n < 2:
+        return {}, {"loss": 0.0, "balanced_acc": 0.0}, {"loss": 0.0, "balanced_acc": 0.0}
+
+    # New universe: all ordered (val, test) choices; training is the rest in canonical order
+    total = n * (n - 1)
     k = floor(total * fraction)
 
     combinations: Dict[int, List[str]] = {}
     if k:
-        sampled_ranks = random.sample(range(total), k)  # uniform, no replacement
-        perms: List[List[str]] = []
-        for r in sampled_ranks:
-            # Inline unranking (factorial number system)
-            pool = unique[:]          # working copy
-            perm: List[str] = []
-            for m in range(n, 0, -1):
-                f = factorial(m - 1)
-                idx = r // f
-                r = r % f
-                perm.append(pool.pop(idx))
-            perms.append(perm)
+        # Sample indices uniformly without replacement from [0, total)
+        sampled = random.sample(range(total), k)
 
-        # Randomize display order of the sampled permutations
+        perms: List[List[str]] = []
+        for r in sampled:
+            # Map r -> (val_idx, test_idx) without materializing the O(n^2) list of pairs
+            val_idx = r // (n - 1)
+            rem = r % (n - 1)
+            test_idx = rem if rem < val_idx else rem + 1  # skip the diagonal
+
+            # Canonical training list = all others in original order
+            if val_idx < test_idx:
+                train = unique[:val_idx] + unique[val_idx + 1:test_idx] + unique[test_idx + 1:]
+            else:
+                train = unique[:test_idx] + unique[test_idx + 1:val_idx] + unique[val_idx + 1:]
+
+            val = unique[val_idx]
+            test = unique[test_idx]
+            perms.append(train + [val, test])
+
+        # Randomize display order of the sampled combinations
         random.shuffle(perms)
         combinations = {i: p for i, p in enumerate(perms)}
 
-    mean = {"loss": 0, "balanced_acc": 0}
-    std = {"loss": 0, "balanced_acc": 0}
-
+    mean = {"loss": 0.0, "balanced_acc": 0.0}
+    std = {"loss": 0.0, "balanced_acc": 0.0}
     return combinations, mean, std
 
 def fix_length(df_imu: pd.DataFrame, target_len: int = 18_000,

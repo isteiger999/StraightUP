@@ -5,7 +5,7 @@ configure_tensorflow_gpu()   # decide GPU/CPU first
 configure_tensorflow()       # then threads/repro settings
 
 from CNN import CNN_model, export_coreml
-from events_and_windowing import X_and_y, count_labels, edit_csv, count_all_zero_windows, verify_lengths, find_combinations
+from events_and_windowing import X_and_y, count_labels, edit_csv, count_all_zero_windows, verify_lengths, find_combinations, std_mean, individual_accuracy
 from TCN import train_eval_tcn
 import warnings
 from urllib3.exceptions import NotOpenSSLWarning
@@ -17,8 +17,8 @@ warnings.filterwarnings("ignore", category=NotOpenSSLWarning)
 
 def main():
     print("Physical GPUs:", tf.config.list_physical_devices('GPU'))
-    participants = ['Ivan', 'Dario', 'David', 'Mohid', 'Claire']         # 'Ivaan', 'Claire'
-    combinations, mean, std = find_combinations(participants, fraction = 1)  # fraction 0.1 means cut off  
+    participants = ['Ivan', 'Dario', 'David', 'Claire', 'Mohid', 'Svetlana']         # 'Ivaan', 'Claire'
+    combinations, mean, std = find_combinations(participants, fraction = 0.034)  # fraction 0.1 means cut off  
     n = len(combinations)
     print(combinations)
 
@@ -31,6 +31,7 @@ def main():
         X_val, y_val = X_and_y("val", list_comb)
         X_test, y_test = X_and_y("test", list_comb)
 
+        
         #count_all_zero_windows(X_train)
         #count_all_zero_windows(X_val)
         #count_all_zero_windows(X_test)
@@ -50,16 +51,13 @@ def main():
         
 
     # calculate std only now, after mean has already been calculated
-    for k in std.keys():
-        var = std[k] - mean[k] * mean[k]
-        std[k] = float(np.sqrt(var if var > 0 else 0.0))
-    print("mean stats")
-    for k, v in mean.items():
-        print(f"  {k}: {v:.6f}")
-    print("std stats")
-    for k, v in std.items():
-        print(f"  {k}: {v:.6f}")
+    std_mean(mean, std)
 
+    # print accuracy on individual classes (0 = upright, 1 = transition, 2 = slouch)
+    #model = cnn
+    model = TCN_model
+    individual_accuracy(model, X_test, y_test)
+    
 
 if __name__ == '__main__':
     main()

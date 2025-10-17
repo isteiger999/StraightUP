@@ -47,6 +47,17 @@ def folders_tot(type, list_comb):
     
     return all_matching_folders, num_beep_schedules_folders
 
+def std_mean(mean, std):
+    for k in std.keys():
+        var = std[k] - mean[k] * mean[k]
+        std[k] = float(np.sqrt(var if var > 0 else 0.0))
+    print("mean stats")
+    for k, v in mean.items():
+        print(f"  {k}: {v:.6f}")
+    print("std stats")
+    for k, v in std.items():
+        print(f"  {k}: {v:.6f}")
+
 def count_all_zero_windows(X):
     """
     X: np.ndarray of shape (N, 400, 14)
@@ -539,6 +550,52 @@ def edit_csv():
                 df_imu.to_csv(csv_path, index=False)
             except Exception as e:
                 print(f"❌ Failed to write: {csv_path}\n   ↳ {e}")
+
+def individual_accuracy(model, X_test, y_test, classes=(0, 1, 2)):
+    """
+    Print per-class accuracy (i.e., recall per class) for a 3-class classifier.
+    Handles y_test in shape (N,), (N,1), or one-hot (N,3), and predictions in (N,3) or (N,1,3).
+    """
+
+    # --- Normalize y_true to shape (N,) with integer class IDs ---
+    y_true = np.asarray(y_test)
+    if y_true.ndim > 1 and y_true.shape[-1] > 1:
+        # one-hot -> class ids
+        y_true = np.argmax(y_true, axis=-1)
+    y_true = np.squeeze(y_true).astype(int).ravel()  # ensure 1-D
+
+    # --- Predict and normalize to class ids (N,) ---
+    y_prob = model.predict(X_test, verbose=0)
+
+    # common TCN cases: (N,3) or (N,1,3)
+    if y_prob.ndim == 3 and y_prob.shape[1] == 1:
+        y_prob = y_prob[:, 0, :]       # squeeze time/channel dim
+    elif y_prob.ndim == 3:
+        # If your model outputs (N,T,C) with T>1, decide how to reduce (e.g., last timestep):
+        y_prob = y_prob[:, -1, :]      # take last timestep; adjust if you prefer avg/max
+
+    if y_prob.ndim == 2:
+        y_pred = np.argmax(y_prob, axis=-1)
+    elif y_prob.ndim == 1:
+        # already class ids
+        y_pred = y_prob.astype(int)
+    else:
+        raise ValueError(f"Unexpected prediction shape: {y_prob.shape}")
+
+    y_pred = np.squeeze(y_pred).astype(int).ravel()  # ensure 1-D
+
+    if y_pred.shape[0] != y_true.shape[0]:
+        raise ValueError(f"Length mismatch: y_pred={y_pred.shape}, y_true={y_true.shape}")
+
+    # --- Per-class accuracy (recall) ---
+    for c in classes:
+        mask = (y_true == c)           # 1-D boolean mask
+        n = int(mask.sum())
+        if n == 0:
+            print(f"Class {c}: no samples (n=0)")
+            continue
+        acc = float(np.mean(y_pred[mask] == y_true[mask]))
+        print(f"Class {c}: Accuracy={acc:.3f} (n={n})")
 
 def label_at_time(t, names, times, m):
     """

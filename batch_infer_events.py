@@ -16,8 +16,8 @@ Behavior:
 - If no schedule is found:
     We still write an events file with just the initial UPRIGHT_HOLD_START at t0 (and a header-only debug CSV).
 
-**This version infers all 8 movements. For the five non-slouch movements
-(lateral_left, lateral_right, neck_only, reach_left, reach_right) it renames:**
+**This version infers all 8 movements. For the four non-slouch movements
+(lateral_left, lateral_right, reach_left, reach_right) it renames:**
     SLOUCH_START            -> NOSLOUCH_START
     SLOUCHED_HOLD_START     -> NOSLOUCHED_HOLD_START
 Recovery events remain RECOVERY_START and UPRIGHT_HOLD_START.
@@ -36,8 +36,9 @@ import pandas as pd
 RAD2DEG = 180.0 / math.pi
 
 # ====== Movement sets =======================================================
-SLOUCH_MOVES   = {"normal_slouch", "fast_slouch", "micro_slouch"}
-NOSLOUCH_MOVES = {"lateral_left", "lateral_right", "neck_only", "reach_left", "reach_right"}
+# neck_only is now considered a slouching movement.
+SLOUCH_MOVES   = {"normal_slouch", "fast_slouch", "micro_slouch", "neck_only"}
+NOSLOUCH_MOVES = {"lateral_left", "lateral_right", "reach_left", "reach_right"}
 
 # ====== Tunables ============================================================
 # windows / gates

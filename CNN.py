@@ -121,7 +121,7 @@ def CNN_model(X_train, y_train, X_val, y_val, verbose, n_classes=3):
         X_train_shuffled, y_train_shuffled,
         validation_data=(X_val, y_val),
         epochs=200,
-        batch_size=64,
+        batch_size=128,
         shuffle=False,
         callbacks=callbacks,
         verbose=verbose,

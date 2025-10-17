@@ -5,7 +5,6 @@ import numpy as np
 import tensorflow as tf
 from tensorflow.keras import layers, models, regularizers
 from sklearn.utils.class_weight import compute_class_weight
-from tensorflow.keras.optimizers import Adam
 
 # ---------- Balanced Accuracy (metric you can maximize) ----------
 class BalancedAccuracy(tf.keras.metrics.Metric):

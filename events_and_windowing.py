@@ -680,6 +680,215 @@ def find_shapes():
 
     return t, dt_med, fs, win_len_frames, stride_frames, N, windows_per_rec, stride, len_window_sec
 
+# confusion_utils.py
+import os
+from datetime import datetime
+from typing import Optional, Sequence
+
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.metrics import confusion_matrix
+
+
+class ConfusionMatrixAverager:
+    """
+    Accumulates raw confusion matrices over multiple runs and saves
+    a single averaged confusion matrix as a PNG.
+
+    - Uses raw counts per run (no normalization) and sums them.
+      The final figure is row-normalized so each row shows per-class recall.
+      This corresponds to pooling all test samples across runs, which is
+      robust when each split has different class supports.
+
+    Parameters
+    ----------
+    n_classes : Optional[int]
+        If None, inferred from history.model.output_shape[-1] on the first add(...).
+    class_names : Optional[Sequence[str]]
+        If None and n_classes==3, defaults to ["upright", "transition", "slouch"].
+        Else defaults to ["0","1",...].
+    save_dir : str
+        Directory to save figures into (created if missing).
+    """
+
+    def __init__(self,
+                 n_classes: Optional[int] = None,
+                 class_names: Optional[Sequence[str]] = None,
+                 save_dir: str = "confusion_matrix"):
+        self.n_classes = None if n_classes is None else int(n_classes)
+        self.class_names = list(class_names) if class_names is not None else None
+        self.save_dir = save_dir
+
+        self._cm_counts = None  # will be np.ndarray[n_classes, n_classes]
+        self._runs = 0
+
+    # ---------- public API ----------
+    def add(self, history, X, y, batch_size: int = 256, verbose: int = 0):
+        """
+        Add one run's confusion matrix (computed on X,y) to the accumulator.
+
+        Parameters
+        ----------
+        history : tf.keras.callbacks.History
+            The History returned by model.fit(...). We use history.model for prediction.
+        X : np.ndarray
+            Feature array (e.g., your test split), shape [N, T, C].
+        y : np.ndarray
+            Integer class labels, shape [N] or [N,1].
+        """
+        model = getattr(history, "model", None)
+        if model is None:
+            raise ValueError(
+                "The provided 'history' has no .model; pass the History returned by model.fit(...)."
+            )
+
+        X = np.asarray(X)
+        y_true = np.asarray(y).squeeze().astype(np.int64)
+
+        # Initialize shapes/names lazily on first call
+        self._ensure_initialized(history, y_true)
+
+        # Predict and compute raw-count confusion matrix for this run
+        y_probs = model.predict(X, batch_size=batch_size, verbose=verbose)
+        y_pred = np.argmax(y_probs, axis=-1).astype(np.int64)
+
+        cm_counts = confusion_matrix(
+            y_true, y_pred, labels=np.arange(self.n_classes), normalize=None
+        )
+        if self._cm_counts is None:
+            self._cm_counts = cm_counts.astype(np.int64)
+        else:
+            self._cm_counts += cm_counts.astype(np.int64)
+
+        self._runs += 1
+        return cm_counts
+
+    def save_figure(self,
+                    model_tag: str = "tcn",
+                    normalize: str = "true",  # "true" -> row-normalized; "all" or None also supported
+                    dpi: int = 220) -> str:
+        """
+        Save the averaged confusion matrix as a PNG and return the path.
+
+        Parameters
+        ----------
+        model_tag : {"tcn","cnn",...}
+            Used in the filename, e.g. tcn_19-10-2025.png.
+        normalize : {"true","all",None}
+            - "true": rows sum to 1 (per-class recall) [recommended]
+            - "all":  all entries sum to 1
+            - None:   raw counts (summed across runs)
+        dpi : int
+            Figure DPI.
+
+        Returns
+        -------
+        path : str
+            Filesystem path of the saved PNG.
+        """
+        if self._cm_counts is None or self._runs == 0:
+            raise ValueError("No runs added. Call add(...) at least once before saving.")
+
+        cm_plot = self._normalized(self._cm_counts, normalize=normalize)
+        balanced_acc = self._balanced_accuracy_from_counts(self._cm_counts)
+
+        # Plot
+        fig, ax = plt.subplots(figsize=(6.4, 5.6))
+        im = ax.imshow(cm_plot, interpolation="nearest", cmap="Blues")
+        cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        cbar.ax.set_ylabel("Proportion" if normalize else "Count", rotation=90, va="bottom")
+
+        ax.set_xlabel("Predicted label")
+        ax.set_ylabel("True label")
+        ax.set_xticks(np.arange(self.n_classes))
+        ax.set_yticks(np.arange(self.n_classes))
+        ax.set_xticklabels(self.class_names, rotation=45, ha="right")
+        ax.set_yticklabels(self.class_names)
+
+        title_top = f"Averaged Confusion Matrix ({model_tag.upper()})"
+        subtitle = f"Runs: {self._runs} • Balanced Acc: {balanced_acc*100:.1f}%"
+        ax.set_title(f"{title_top}\n{subtitle}")
+
+        # Annotate each cell
+        fmt = ".2f" if normalize else "d"
+        thresh = np.nanmax(cm_plot) / 2.0 if np.size(cm_plot) else 0.5
+        for i in range(self.n_classes):
+            for j in range(self.n_classes):
+                val = cm_plot[i, j]
+                text = format(val, fmt)
+                ax.text(j, i, text,
+                        ha="center", va="center",
+                        color="white" if np.isfinite(val) and val > thresh else "black")
+
+        fig.tight_layout()
+
+        # Safe date string for filenames: dd-mm-yyyy (hyphens instead of slashes)
+        date_str = datetime.now().strftime("%d-%m-%Y")
+        os.makedirs(self.save_dir, exist_ok=True)
+        filename = f"{model_tag.lower()}_{date_str}.png"
+        out_path = os.path.join(self.save_dir, filename)
+
+        fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
+        plt.close(fig)
+        return out_path
+
+    # ---------- helpers ----------
+    def _ensure_initialized(self, history, y_true: np.ndarray):
+        # Infer n_classes from model output size if missing
+        if self.n_classes is None:
+            try:
+                self.n_classes = int(history.model.output_shape[-1])
+            except Exception:
+                self.n_classes = int(np.max(y_true)) + 1
+
+        # Default class names
+        if self.class_names is None:
+            if self.n_classes == 3:
+                self.class_names = ["upright", "transition", "slouch"]
+            else:
+                self.class_names = [str(i) for i in range(self.n_classes)]
+
+    @staticmethod
+    def _normalized(cm_counts: np.ndarray, normalize: Optional[str]):
+        if normalize == "true":
+            # Row-normalize (per-class recall)
+            row_sums = cm_counts.sum(axis=1, keepdims=True).astype(np.float64)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                cm = np.divide(cm_counts, row_sums, where=row_sums > 0)
+                cm[row_sums.squeeze() == 0] = 0.0
+            return cm
+        elif normalize == "all":
+            total = cm_counts.sum()
+            return cm_counts / total if total > 0 else cm_counts.astype(np.float64)
+        else:
+            return cm_counts.astype(np.float64)
+
+    @staticmethod
+    def _balanced_accuracy_from_counts(cm_counts: np.ndarray) -> float:
+        # Balanced accuracy = mean of per-class recall over classes with support > 0
+        row_sums = cm_counts.sum(axis=1).astype(np.float64)
+        diag = np.diag(cm_counts).astype(np.float64)
+        mask = row_sums > 0
+        if not np.any(mask):
+            return float("nan")
+        recalls = np.zeros_like(row_sums, dtype=np.float64)
+        recalls[mask] = diag[mask] / row_sums[mask]
+        return float(np.mean(recalls[mask]))
+
+def save_confusion_matrix_for_run(history, X, y,
+                                  model_tag: str = "tcn",
+                                  save_dir: str = "confusion_matrix",
+                                  dpi: int = 220) -> str:
+    """
+    Convenience helper: compute & save a single-run confusion matrix.
+    (Internally just uses ConfusionMatrixAverager once.)
+
+    Returns the PNG path.
+    """
+    cma = ConfusionMatrixAverager(save_dir=save_dir)
+    cma.add(history, X, y)
+    return cma.save_figure(model_tag=model_tag, dpi=dpi)
+
 
 def X_and_y(type, list_comb):
     matching_folders, n_folders = folders_tot(type, list_comb)

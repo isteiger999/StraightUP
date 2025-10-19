@@ -140,7 +140,7 @@ def train_eval_tcn(X_train, y_train, X_val, y_val, verbose,
     X_train_shuffled = X_train[shuffle_idx]
     y_train_shuffled = y_train[shuffle_idx]
 
-    model.fit(
+    history = model.fit(
         X_train_shuffled, y_train_shuffled,
         validation_data=(X_val, y_val),
         epochs=max_epochs,
@@ -150,4 +150,4 @@ def train_eval_tcn(X_train, y_train, X_val, y_val, verbose,
         verbose=verbose,
         class_weight=class_weight
     )
-    return model
+    return model, history

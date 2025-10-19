@@ -117,7 +117,7 @@ def CNN_model(X_train, y_train, X_val, y_val, verbose, n_classes=3):
     X_train_shuffled = X_train[shuffle_idx]
     y_train_shuffled = y_train[shuffle_idx]
 
-    cnn.fit(
+    history = cnn.fit(
         X_train_shuffled, y_train_shuffled,
         validation_data=(X_val, y_val),
         epochs=200,
@@ -128,7 +128,7 @@ def CNN_model(X_train, y_train, X_val, y_val, verbose, n_classes=3):
         class_weight=class_weight
     )
 
-    return cnn
+    return cnn, history
 
 
 def export_coreml(X_train, model, out_path="PostureCNN.mlpackage"):

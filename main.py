@@ -5,7 +5,7 @@ configure_tensorflow_gpu()   # decide GPU/CPU first
 configure_tensorflow()       # then threads/repro settings
 
 from CNN import CNN_model, export_coreml
-from events_and_windowing import X_and_y, count_labels, edit_csv, count_all_zero_windows, verify_lengths, find_combinations, std_mean, individual_accuracy
+from events_and_windowing import X_and_y, count_labels, edit_csv, count_all_zero_windows, verify_lengths, find_combinations, std_mean, individual_accuracy, ConfusionMatrixAverager
 from TCN import train_eval_tcn
 import warnings
 from urllib3.exceptions import NotOpenSSLWarning
@@ -16,13 +16,19 @@ warnings.filterwarnings("ignore", category=NotOpenSSLWarning)
 
 
 def main():
-    print("Physical GPUs:", tf.config.list_physical_devices('GPU'))
+
     participants = ['Ivan', 'Dario', 'David', 'Claire', 'Mohid', 'Svetlana']         # 'Ivaan', 'Claire'
-    combinations, mean, std = find_combinations(participants, fraction = 0.034)  # fraction 0.1 means cut off  
+    combinations, mean, std = find_combinations(participants, fraction = 0.067)  # fraction 0.1 means cut off  
     n = len(combinations)
     print(combinations)
 
     edit_csv()
+
+    cm_avg = ConfusionMatrixAverager(
+        # optional, but nice, since your labels are known
+        class_names=["upright", "transition", "slouch"],
+        save_dir="confusion_matrix"
+    )
 
     for index, (_, list_comb) in enumerate(sorted(combinations.items(), key=lambda kv: int(kv[0]))):
 
@@ -30,20 +36,18 @@ def main():
         X_train, y_train = X_and_y("train", list_comb)
         X_val, y_val = X_and_y("val", list_comb)
         X_test, y_test = X_and_y("test", list_comb)
-
-        
-        #count_all_zero_windows(X_train)
-        #count_all_zero_windows(X_val)
-        #count_all_zero_windows(X_test)
         
         # 2. Train & Evaluate CNN
-        #cnn = CNN_model(X_train, y_train, X_val, y_val, verbose = 1)
-        TCN_model = train_eval_tcn(X_train, y_train, X_val, y_val, verbose=0)
+        model, history = CNN_model(X_train, y_train, X_val, y_val, verbose = 1)
+        #model, history = train_eval_tcn(X_train, y_train, X_val, y_val, verbose=1)
 
         # 3. Testing the CNN
-        #scores = cnn.evaluate(X_test, y_test, return_dict=True, verbose = 1)
-        scores = TCN_model.evaluate(X_test, y_test, return_dict=True, verbose = 1)
-        print(f"TCN {index + 1}/{len(combinations)} trained")
+        scores = model.evaluate(X_test, y_test, return_dict=True, verbose = 1)
+        #scores = model.evaluate(X_test, y_test, return_dict=True, verbose = 1)
+        print(f"CNN {index + 1}/{len(combinations)} trained")
+
+        # 4. Confusion Matrix and mean/std
+        cm_avg.add(history, X_test, y_test, batch_size=256, verbose=0)
 
         for k, v in scores.items():
             mean[k] += v / n           # E[X]
@@ -54,9 +58,10 @@ def main():
     std_mean(mean, std)
 
     # print accuracy on individual classes (0 = upright, 1 = transition, 2 = slouch)
-    #model = cnn
-    model = TCN_model
     individual_accuracy(model, X_test, y_test)
+
+    png_path = cm_avg.save_figure(model_tag="cnn", normalize="true")  # or "cnn"
+    print(f"✅ Saved averaged confusion matrix to: {png_path}")
     
 
 if __name__ == '__main__':

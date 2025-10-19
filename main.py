@@ -18,7 +18,7 @@ warnings.filterwarnings("ignore", category=NotOpenSSLWarning)
 def main():
 
     participants = ['Ivan', 'Dario', 'David', 'Claire', 'Mohid', 'Svetlana']         # 'Ivaan', 'Claire'
-    combinations, mean, std = find_combinations(participants, fraction = 0.067)  # fraction 0.1 means cut off  
+    combinations, mean, std = find_combinations(participants, fraction = 0.1)  # fraction 0.1 means cut off  
     n = len(combinations)
     print(combinations)
 
@@ -57,10 +57,8 @@ def main():
     # calculate std only now, after mean has already been calculated
     std_mean(mean, std)
 
-    # print accuracy on individual classes (0 = upright, 1 = transition, 2 = slouch)
-    individual_accuracy(model, X_test, y_test)
-
-    png_path = cm_avg.save_figure(model_tag="cnn", normalize="true")  # or "cnn"
+    # print Confusion matrix (0 = upright, 1 = transition, 2 = slouch)
+    png_path = cm_avg.save_figure(model_tag="cnn", normalize="pred")
     print(f"✅ Saved averaged confusion matrix to: {png_path}")
     
 

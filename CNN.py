@@ -58,8 +58,6 @@ class BalancedAccuracy(tf.keras.metrics.Metric):
 def CNN_model(X_train, y_train, X_val, y_val, verbose, n_classes=3):
     T = X_train.shape[1]
     n_ch = X_train.shape[2]
-    assert X_train.ndim == 3 and X_train.shape[1:] == (75, n_ch)
-    assert X_val.shape[1:]   == (75, n_ch)
 
     # labels should be integer class IDs: 0,1,2
     y_train = y_train.squeeze().astype("int32")

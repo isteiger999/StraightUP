@@ -10,6 +10,10 @@ from itertools import permutations, islice
 from math import factorial, floor
 from typing import List, Dict, Tuple
 import random
+from datetime import datetime
+from typing import Optional, Sequence
+import matplotlib.pyplot as plt
+from sklearn.metrics import confusion_matrix
 
 
 # count number of beep_schedules_folders:
@@ -654,51 +658,20 @@ def label_at_time(t, names, times, m):
     # default
     return 0
 
-def find_shapes():
-    # pick the first IMU file under data/*/
-    DATA_ROOT = os.path.join(os.getcwd(), "data")
-    imu_glob = os.path.join(DATA_ROOT, 'beep_schedules_*', 'airpods_motion_*.csv')
-    imu_list = glob.glob(imu_glob)
-    if not imu_list:
-        raise FileNotFoundError(f"No IMU CSVs found with pattern: {imu_glob}")
-
-    df_imu = pd.read_csv(imu_list[0])  # use first found file
-
-    t = df_imu.iloc[:, 0].astype(float).to_numpy()
-    dt = np.diff(t)
-    dt_med = float(np.median(dt)) if dt.size > 0 else (1.0/50.0)
-    fs = (1.0 / dt_med) if dt_med > 0 else 50.0
-    stride = 0.5
-    len_window_sec = 1.5
-
-    win_len_frames = int(round(len_window_sec * fs))      # samples per window
-    stride_frames = int(round(stride * fs))    # samples per stride
-
-    # Recompute windows_per_rec from sample counts (more robust than using seconds)
-    N = df_imu.shape[0]                           # 18'000
-    windows_per_rec = max(0, 1 + (N - win_len_frames) // stride_frames)
-
-    return t, dt_med, fs, win_len_frames, stride_frames, N, windows_per_rec, stride, len_window_sec
-
-# confusion_utils.py
-import os
-from datetime import datetime
-from typing import Optional, Sequence
-
-import numpy as np
-import matplotlib.pyplot as plt
-from sklearn.metrics import confusion_matrix
-
-
 class ConfusionMatrixAverager:
     """
     Accumulates raw confusion matrices over multiple runs and saves
     a single averaged confusion matrix as a PNG.
 
     - Uses raw counts per run (no normalization) and sums them.
-      The final figure is row-normalized so each row shows per-class recall.
-      This corresponds to pooling all test samples across runs, which is
-      robust when each split has different class supports.
+      The final figure can be normalized in different ways for display:
+        * normalize="true":  rows sum to 1 (per-true-class recall)
+        * normalize="pred":  columns sum to 1 (per-predicted-class precision)
+        * normalize="all":   entire matrix sums to 1
+        * normalize=None:    raw counts
+
+      Summing raw counts corresponds to pooling all test samples across runs,
+      which is robust when each split has different class supports.
 
     Parameters
     ----------
@@ -765,7 +738,7 @@ class ConfusionMatrixAverager:
 
     def save_figure(self,
                     model_tag: str = "tcn",
-                    normalize: str = "true",  # "true" -> row-normalized; "all" or None also supported
+                    normalize: str = "true",  # "true", "pred", "all", or None
                     dpi: int = 220) -> str:
         """
         Save the averaged confusion matrix as a PNG and return the path.
@@ -773,9 +746,10 @@ class ConfusionMatrixAverager:
         Parameters
         ----------
         model_tag : {"tcn","cnn",...}
-            Used in the filename, e.g. tcn_19-10-2025.png.
-        normalize : {"true","all",None}
-            - "true": rows sum to 1 (per-class recall) [recommended]
+            Used in the filename, e.g. tcn_19-10-2025_14-37.png.
+        normalize : {"true","pred","all",None}
+            - "true": rows sum to 1 (per-class recall)
+            - "pred": columns sum to 1 (per-class precision)
             - "all":  all entries sum to 1
             - None:   raw counts (summed across runs)
         dpi : int
@@ -796,7 +770,8 @@ class ConfusionMatrixAverager:
         fig, ax = plt.subplots(figsize=(6.4, 5.6))
         im = ax.imshow(cm_plot, interpolation="nearest", cmap="Blues")
         cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        cbar.ax.set_ylabel("Proportion" if normalize else "Count", rotation=90, va="bottom")
+        cbar.ax.set_ylabel("Proportion" if normalize is not None else "Count",
+                           rotation=90, va="bottom")
 
         ax.set_xlabel("Predicted label")
         ax.set_ylabel("True label")
@@ -805,27 +780,33 @@ class ConfusionMatrixAverager:
         ax.set_xticklabels(self.class_names, rotation=45, ha="right")
         ax.set_yticklabels(self.class_names)
 
+        norm_label = { "true": "row-normalized",
+                       "pred": "col-normalized",
+                       "all":  "global-normalized",
+                       None:   "counts" }.get(normalize, "row-normalized")
         title_top = f"Averaged Confusion Matrix ({model_tag.upper()})"
-        subtitle = f"Runs: {self._runs} • Balanced Acc: {balanced_acc*100:.1f}%"
+        subtitle = f"Runs: {self._runs} • Balanced Acc: {balanced_acc*100:.1f}% • {norm_label}"
         ax.set_title(f"{title_top}\n{subtitle}")
 
         # Annotate each cell
-        fmt = ".2f" if normalize else "d"
-        thresh = np.nanmax(cm_plot) / 2.0 if np.size(cm_plot) else 0.5
+        fmt = ".2f" if normalize is not None else "d"
+        # Use nanmax to avoid warnings when matrix may contain NaNs (e.g., empty rows after normalization)
+        valid_max = np.nanmax(cm_plot) if np.any(np.isfinite(cm_plot)) else 0.0
+        thresh = valid_max / 2.0
         for i in range(self.n_classes):
             for j in range(self.n_classes):
                 val = cm_plot[i, j]
-                text = format(val, fmt)
+                text = format(val, fmt) if np.isfinite(val) else "nan"
                 ax.text(j, i, text,
                         ha="center", va="center",
                         color="white" if np.isfinite(val) and val > thresh else "black")
 
         fig.tight_layout()
 
-        # Safe date string for filenames: dd-mm-yyyy (hyphens instead of slashes)
-        date_str = datetime.now().strftime("%d-%m-%Y")
+        # Safe timestamp for filenames: dd-mm-yyyy_HH-MM (no seconds, filesystem-safe)
+        timestamp = datetime.now().strftime("%d-%m-%Y_%H-%M")
         os.makedirs(self.save_dir, exist_ok=True)
-        filename = f"{model_tag.lower()}_{date_str}.png"
+        filename = f"{model_tag.lower()}_{timestamp}.png"
         out_path = os.path.join(self.save_dir, filename)
 
         fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
@@ -857,8 +838,18 @@ class ConfusionMatrixAverager:
                 cm = np.divide(cm_counts, row_sums, where=row_sums > 0)
                 cm[row_sums.squeeze() == 0] = 0.0
             return cm
+        elif normalize == "pred":
+            # Column-normalize (per-class precision across predictions)
+            col_sums = cm_counts.sum(axis=0, keepdims=True).astype(np.float64)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                cm = np.divide(cm_counts, col_sums, where=col_sums > 0)
+                # For columns with zero predictions, keep zeros
+                zero_cols = (col_sums.squeeze() == 0)
+                if np.any(zero_cols):
+                    cm[:, zero_cols] = 0.0
+            return cm
         elif normalize == "all":
-            total = cm_counts.sum()
+            total = cm_counts.sum().astype(np.float64)
             return cm_counts / total if total > 0 else cm_counts.astype(np.float64)
         else:
             return cm_counts.astype(np.float64)
@@ -878,7 +869,8 @@ class ConfusionMatrixAverager:
 def save_confusion_matrix_for_run(history, X, y,
                                   model_tag: str = "tcn",
                                   save_dir: str = "confusion_matrix",
-                                  dpi: int = 220) -> str:
+                                  dpi: int = 220,
+                                  normalize: str = "true") -> str:
     """
     Convenience helper: compute & save a single-run confusion matrix.
     (Internally just uses ConfusionMatrixAverager once.)
@@ -887,7 +879,33 @@ def save_confusion_matrix_for_run(history, X, y,
     """
     cma = ConfusionMatrixAverager(save_dir=save_dir)
     cma.add(history, X, y)
-    return cma.save_figure(model_tag=model_tag, dpi=dpi)
+    return cma.save_figure(model_tag=model_tag, dpi=dpi, normalize=normalize)
+
+def find_shapes():
+    # pick the first IMU file under data/*/
+    DATA_ROOT = os.path.join(os.getcwd(), "data")
+    imu_glob = os.path.join(DATA_ROOT, 'beep_schedules_*', 'airpods_motion_*.csv')
+    imu_list = glob.glob(imu_glob)
+    if not imu_list:
+        raise FileNotFoundError(f"No IMU CSVs found with pattern: {imu_glob}")
+
+    df_imu = pd.read_csv(imu_list[0])  # use first found file
+
+    t = df_imu.iloc[:, 0].astype(float).to_numpy()
+    dt = np.diff(t)
+    dt_med = float(np.median(dt)) if dt.size > 0 else (1.0/50.0)
+    fs = (1.0 / dt_med) if dt_med > 0 else 50.0
+    stride = 0.5
+    len_window_sec = 1.5
+
+    win_len_frames = int(round(len_window_sec * fs))      # samples per window
+    stride_frames = int(round(stride * fs))    # samples per stride
+
+    # Recompute windows_per_rec from sample counts (more robust than using seconds)
+    N = df_imu.shape[0]                           # 18'000
+    windows_per_rec = max(0, 1 + (N - win_len_frames) // stride_frames)
+
+    return t, dt_med, fs, win_len_frames, stride_frames, N, windows_per_rec, stride, len_window_sec
 
 
 def X_and_y(type, list_comb):

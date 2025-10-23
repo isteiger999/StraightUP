@@ -23,7 +23,7 @@ def main():
     print(combinations)
 
     edit_csv()
-
+    
     cm_avg = ConfusionMatrixAverager(
         # optional, but nice, since your labels are known
         class_names=["upright", "transition", "slouch"],
@@ -38,12 +38,11 @@ def main():
         X_test, y_test = X_and_y("test", list_comb)
         
         # 2. Train & Evaluate CNN
-        model, history = CNN_model(X_train, y_train, X_val, y_val, verbose = 1)
-        #model, history = train_eval_tcn(X_train, y_train, X_val, y_val, verbose=1)
+        #model, history = CNN_model(X_train, y_train, X_val, y_val, verbose = 1)
+        model, history = train_eval_tcn(X_train, y_train, X_val, y_val, verbose=1)
 
         # 3. Testing the CNN
         scores = model.evaluate(X_test, y_test, return_dict=True, verbose = 1)
-        #scores = model.evaluate(X_test, y_test, return_dict=True, verbose = 1)
         print(f"CNN {index + 1}/{len(combinations)} trained")
 
         # 4. Confusion Matrix and mean/std
@@ -58,7 +57,7 @@ def main():
     std_mean(mean, std)
 
     # print Confusion matrix (0 = upright, 1 = transition, 2 = slouch)
-    png_path = cm_avg.save_figure(model_tag="cnn", normalize="pred")
+    png_path = cm_avg.save_figure(model_tag="tcn", normalize="pred")
     print(f"✅ Saved averaged confusion matrix to: {png_path}")
     
 

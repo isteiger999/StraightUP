@@ -8,12 +8,12 @@ import glob
 import os
 from itertools import permutations, islice
 from math import factorial, floor
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional, Sequence
 import random
 from datetime import datetime
-from typing import Optional, Sequence
 import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix
+import re
 
 
 # count number of beep_schedules_folders:
@@ -515,6 +515,318 @@ def normalize_chanels(df_imu: pd.DataFrame, time_col_idx: int = 0, stats: dict =
     df_imu.loc[:, feat_cols] = Xn.astype(np.float32)
     # (timestamp column left untouched)
 
+##### DELTA CALCULATION ###
+def _detect_timestamp_col(df, candidates=("t_sec", "timestamp", "time", "time_sec", "epoch", "epoch_s")):
+    # Prefer common names
+    for c in candidates:
+        if c in df.columns:
+            return c
+    # Fallback: if the first column is numeric & monotonic, assume it's time
+    first = df.columns[0]
+    s = pd.to_numeric(df[first], errors="coerce")
+    if s.notna().all() and s.is_monotonic_increasing:
+        return first
+    return None
+
+def make_delta_csv_path(csv_path: str) -> str:
+    """
+    Insert a 'd' after the second underscore:
+      airpods_motion_1760734866.csv -> airpods_motion_d1760734866.csv
+    Fallback: file.csv -> file_d.csv
+    """
+    folder, fname = os.path.split(csv_path)
+    parts = fname.split("_", 2)  # ["airpods", "motion", "1760734866.csv"]
+    if len(parts) >= 3:
+        new_fname = f"{parts[0]}_{parts[1]}_d{parts[2]}"
+    else:
+        base, ext = os.path.splitext(fname)
+        new_fname = f"{base}_d{ext or '.csv'}"
+    return os.path.join(folder, new_fname)
+
+def _choose_events_file_for(csv_path: str,
+                            df_imu: pd.DataFrame,
+                            timestamp_col: Optional[str] = None) -> Optional[str]:
+    """
+    In the IMU csv's folder, pick the events_inferred_*.csv that best overlaps
+    the IMU time range. If only one exists, pick that.
+    """
+    folder = os.path.dirname(csv_path)
+    candidates = sorted(glob.glob(os.path.join(folder, "events_inferred_*.csv")))
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+
+    # detect timestamp column if not provided
+    if not timestamp_col:
+        timestamp_col = _detect_timestamp_col(df_imu)
+    if not timestamp_col or timestamp_col not in df_imu.columns:
+        return None
+
+    # compute IMU range
+    t = pd.to_numeric(df_imu[timestamp_col], errors="coerce").dropna()
+    if t.empty:
+        return None
+    tmin, tmax = float(t.min()), float(t.max())
+    imu_mid = 0.5 * (tmin + tmax)
+
+    def file_ts_hint(path: str) -> Optional[float]:
+        m = re.search(r"events_inferred_(\d+(?:\.\d+)?)", os.path.basename(path))
+        return float(m.group(1)) if m else None
+
+    best = None
+    best_overlap = -1.0
+    best_hint_dist = float("inf")
+
+    for ev_path in candidates:
+        try:
+            ev = pd.read_csv(ev_path, usecols=["t_sec"])
+            ev_t = pd.to_numeric(ev["t_sec"], errors="coerce").dropna()
+            if ev_t.empty:
+                continue
+            emin, emax = float(ev_t.min()), float(ev_t.max())
+            overlap = max(0.0, min(tmax, emax) - max(tmin, emin))
+            hint = file_ts_hint(ev_path)
+            hint_dist = abs(imu_mid - hint) if hint is not None else float("inf")
+            if overlap > best_overlap or (overlap == best_overlap and hint_dist < best_hint_dist):
+                best, best_overlap, best_hint_dist = ev_path, overlap, hint_dist
+        except Exception:
+            continue
+
+    return best or candidates[0]
+
+def _extract_upright_windows(events_df: pd.DataFrame,
+                             t_end: float,
+                             start_event: str = "UPRIGHT_HOLD_START",
+                             end_events: Tuple[str, ...] = ("SLOUCH_START", "UPRIGHT_HOLD_START"),
+                             min_window_seconds: float = 0.5) -> List[Tuple[float, float]]:
+    """
+    Scan events chronologically and return (start, end) windows for upright holds.
+    A window starts at UPRIGHT_HOLD_START and ends at the next SLOUCH_START
+    (or at the next UPRIGHT_HOLD_START if it appears earlier). If the recording
+    ends while upright, close the last window at t_end.
+    """
+    df = events_df.copy()
+    if "t_sec" not in df.columns or "event" not in df.columns:
+        return []
+
+    df["t_sec"] = pd.to_numeric(df["t_sec"], errors="coerce")
+    df = df.dropna(subset=["t_sec"]).sort_values("t_sec")
+
+    windows: List[Tuple[float, float]] = []
+    current_start: Optional[float] = None
+
+    for _, row in df.iterrows():
+        ev = str(row["event"])
+        ts = float(row["t_sec"])
+
+        if ev == start_event:
+            # if we already were in an upright window, close it here (defensive)
+            if current_start is not None and ts > current_start:
+                dur = ts - current_start
+                if dur >= min_window_seconds:
+                    windows.append((current_start, ts))
+            current_start = ts
+        elif ev in end_events and current_start is not None and ts > current_start:
+            dur = ts - current_start
+            if dur >= min_window_seconds:
+                windows.append((current_start, ts))
+            current_start = None
+
+    # If recording ends while upright, close the last window at t_end
+    if current_start is not None and t_end > current_start:
+        dur = t_end - current_start
+        if dur >= min_window_seconds:
+            windows.append((current_start, t_end))
+
+    return windows
+
+def _upright_segments(events_df: pd.DataFrame, t_end: float) -> List[Tuple[float, float]]:
+    """
+    Return epoch segments driven by UPRIGHT_HOLD_START:
+      [(u0, u1), (u1, u2), ..., (u_last, t_end)]
+    Each segment receives the baseline computed from its own upright-only window.
+    """
+    if "t_sec" not in events_df.columns or "event" not in events_df.columns:
+        return []
+
+    df = events_df[events_df["event"] == "UPRIGHT_HOLD_START"].copy()
+    if df.empty:
+        return []
+
+    u = pd.to_numeric(df["t_sec"], errors="coerce").dropna().sort_values().tolist()
+    segments: List[Tuple[float, float]] = []
+    for i, s in enumerate(u):
+        e = u[i + 1] if i + 1 < len(u) else t_end
+        if e > s:
+            segments.append((float(s), float(e)))
+    return segments
+
+def calculate_deltas(
+    df_imu: pd.DataFrame,
+    *,
+    csv_path: Optional[str] = None,
+    events_path: Optional[str] = None,
+    timestamp_col: Optional[str] = None,   # auto-detected if None
+    id_cols: Optional[List[str]] = None,   # preserved (not baseline-subtracted)
+    baseline_method: str = "mean",         # "mean" or "median"
+    min_window_seconds: float = 0.5,
+    scope: str = "per_upright_epoch",      # default: per-epoch rebaselining
+    apply_global_to_gaps: bool = True,     # apply global upright baseline outside epochs
+    reuse_last_baseline: bool = True,      # if an epoch has no upright samples
+    add_epoch_id: bool = False,            # optional debug column
+    verbose: bool = True
+) -> Tuple[pd.DataFrame, Dict[str, float], List[Tuple[float, float]]]:
+    """
+    Convert IMU channels to deltas relative to an upright baseline.
+
+    scope="per_upright_epoch" (default):
+        For each UPRIGHT_HOLD_START at time u_i:
+          • Baseline = aggregate (mean/median) over the upright-only window that begins at u_i
+            and ends at the next SLOUCH_START or next UPRIGHT_HOLD_START (whichever comes first).
+          • Apply that baseline to the entire epoch [u_i, u_{i+1}) (upright + following slouch).
+        Rows not covered by any epoch receive the global upright baseline if apply_global_to_gaps=True.
+
+    scope="global":
+        One baseline per channel = aggregate over ALL upright windows (fallback: whole file).
+        Apply everywhere.
+
+    Returns
+    -------
+    df_delta : DataFrame
+        Copy of df_imu with numeric (non-id) columns baseline-subtracted.
+        If add_epoch_id=True, includes an 'epoch_id' column (-1 for gap/global rows).
+    baseline : dict
+        The global upright baseline used (still useful for inspection/fallbacks).
+    windows : list[(start, end)]
+        Upright-only windows used to compute per-epoch baselines (and the global one).
+    """
+    # --- detect timestamp column if not provided ---
+    if not timestamp_col:
+        timestamp_col = _detect_timestamp_col(df_imu)
+    if not timestamp_col or timestamp_col not in df_imu.columns:
+        raise ValueError("Could not detect a timestamp column (looked for 't_sec', 'timestamp', 'time', ...).")
+
+    # Identify events file (auto-pick best overlap in same folder when not given)
+    ev_path = events_path
+    if ev_path is None and csv_path is not None:
+        ev_path = _choose_events_file_for(csv_path, df_imu, timestamp_col=timestamp_col)
+
+    events_df = None
+    if ev_path is not None and os.path.isfile(ev_path):
+        try:
+            events_df = pd.read_csv(ev_path, usecols=["t_sec", "event"])
+        except Exception:
+            events_df = None
+
+    # Time vector & boundaries
+    t_series = pd.to_numeric(df_imu[timestamp_col], errors="coerce").dropna()
+    if t_series.empty:
+        raise ValueError(f"Timestamp column '{timestamp_col}' contains no numeric values.")
+    t_min = float(t_series.min()); t_end = float(t_series.max())
+    t = pd.to_numeric(df_imu[timestamp_col], errors="coerce").values
+
+    # Upright-only windows (for baselines) and epoch segments (for application)
+    windows: List[Tuple[float, float]] = []
+    segments: List[Tuple[float, float]] = []
+    if events_df is not None and not events_df.empty:
+        windows = _extract_upright_windows(events_df, t_end=t_end, min_window_seconds=min_window_seconds)
+        segments = _upright_segments(events_df, t_end=t_end)
+
+    # Columns to delta-transform
+    if id_cols is None:
+        id_cols = [timestamp_col]
+    id_set = set(id_cols)
+    numeric_cols = df_imu.select_dtypes(include=[np.number]).columns.tolist()
+    delta_cols = [c for c in numeric_cols if c not in id_set]
+
+    def agg(df_sub: pd.DataFrame) -> Dict[str, float]:
+        if not delta_cols:
+            return {}
+        if baseline_method == "median":
+            return df_sub[delta_cols].median(numeric_only=True).to_dict()
+        return df_sub[delta_cols].mean(numeric_only=True).to_dict()
+
+    # Global upright baseline (used for gaps and as fallback)
+    if windows:
+        mask_upright_all = np.zeros(len(df_imu), dtype=bool)
+        for (s, e) in windows:
+            mask_upright_all |= (t >= s) & (t < e)
+        global_baseline = agg(df_imu.loc[mask_upright_all]) if mask_upright_all.any() else agg(df_imu)
+    else:
+        global_baseline = agg(df_imu)
+
+    df_delta = df_imu.copy()
+
+    # --- scope: global (simple path) ---
+    if scope == "global" or not segments or events_df is None or events_df.empty:
+        for c in delta_cols:
+            b = global_baseline.get(c, 0.0)
+            if pd.notna(b):
+                df_delta[c] = df_delta[c] - b
+        if add_epoch_id:
+            df_delta["epoch_id"] = -1
+        if verbose:
+            source = "upright_windows" if windows else "global"
+            print(f"Δ-baseline: {baseline_method} / global from {source} "
+                  f"(windows={len(windows)}, samples_used={len(df_imu)}). "
+                  f"Transformed {len(delta_cols)} channels. Time='{timestamp_col}'.")
+        return df_delta, global_baseline, windows
+
+    # --- scope: per_upright_epoch ---
+    baseline_window_by_start: Dict[float, Tuple[float, float]] = {s: (s, e) for (s, e) in windows}
+    touched = np.zeros(len(df_imu), dtype=bool)
+    epoch_ids = np.full(len(df_imu), -1, dtype=int)  # -1 = not in any epoch
+    last_baseline_vals: Optional[Dict[str, float]] = None
+    epochs_applied = 0
+
+    for epoch_idx, (seg_start, seg_end) in enumerate(segments):
+        # Baseline window for this epoch (upright-only)
+        bw = baseline_window_by_start.get(seg_start)
+        if bw is not None:
+            b_start, b_end = bw
+            m_b = (t >= b_start) & (t < b_end)
+            if m_b.any():
+                baseline_vals = agg(df_imu.loc[m_b])
+                last_baseline_vals = baseline_vals
+            else:
+                baseline_vals = last_baseline_vals if (reuse_last_baseline and last_baseline_vals is not None) else global_baseline
+        else:
+            baseline_vals = last_baseline_vals if (reuse_last_baseline and last_baseline_vals is not None) else global_baseline
+
+        # Apply baseline to the entire epoch [seg_start, seg_end)
+        m_seg = (t >= seg_start) & (t < seg_end)
+        if m_seg.any():
+            for c in delta_cols:
+                b = baseline_vals.get(c, 0.0)
+                if pd.notna(b):
+                    df_delta.loc[m_seg, c] = df_delta.loc[m_seg, c] - b
+            touched |= m_seg
+            epoch_ids[m_seg] = epoch_idx
+            epochs_applied += 1
+
+    # Apply global upright baseline to gaps (outside any epoch)
+    if apply_global_to_gaps:
+        m_gap = ~touched
+        if m_gap.any():
+            for c in delta_cols:
+                b = global_baseline.get(c, 0.0)
+                if pd.notna(b):
+                    df_delta.loc[m_gap, c] = df_delta.loc[m_gap, c] - b
+            # epoch_ids for gaps remain -1
+
+    if add_epoch_id:
+        df_delta["epoch_id"] = epoch_ids
+
+    if verbose:
+        print(f"Δ-baseline: {baseline_method} / per_upright_epoch "
+              f"(epochs_applied={epochs_applied}, windows={len(windows)}). "
+              f"Gaps->global={apply_global_to_gaps}. "
+              f"Transformed {len(delta_cols)} channels. Time='{timestamp_col}'.")
+
+    return df_delta, global_baseline, windows
+############################
+
 def edit_csv():
     """
     Walk data/beep_schedules_*/, open each airpods_motion_*.csv,
@@ -554,6 +866,21 @@ def edit_csv():
                 df_imu.to_csv(csv_path, index=False)
             except Exception as e:
                 print(f"❌ Failed to write: {csv_path}\n   ↳ {e}")
+
+            ### NEW FILE WITH DELTA CALCULATION ###
+
+            try:
+                df_delta, _, _ = calculate_deltas(
+                    df_imu,
+                    csv_path=csv_path,
+                    id_cols=[_detect_timestamp_col(df_imu), "quat_x", "quat_y", "quat_z", "quat_w"],
+                    min_window_seconds=1.0,
+                    verbose=False
+                )
+                out_csv = make_delta_csv_path(csv_path)
+                df_delta.to_csv(out_csv, index=False)
+            except Exception as e:
+                print(f"⚠️ Delta conversion skipped for: {csv_path}\n   ↳ {e}")
 
 def individual_accuracy(model, X_test, y_test, classes=(0, 1, 2)):
     """
@@ -920,7 +1247,7 @@ def X_and_y(type, list_comb):
             continue
 
         event_files = glob.glob(os.path.join(folder_path, 'events_inferred_*.csv'))
-        imu_files   = glob.glob(os.path.join(folder_path, 'airpods_motion_*.csv'))
+        imu_files   = glob.glob(os.path.join(folder_path, 'airpods_motion_dd*.csv'))
         if not event_files or not imu_files:
             print(f"⚠️ Missing files in {folder_path}")
             continue

@@ -530,16 +530,26 @@ def _detect_timestamp_col(df, candidates=("t_sec", "timestamp", "time", "time_se
 
 def make_delta_csv_path(csv_path: str) -> str:
     """
-    Insert a 'd' after the second underscore:
-      airpods_motion_1760734866.csv -> airpods_motion_d1760734866.csv
-    Fallback: file.csv -> file_d.csv
+    Return the canonical delta path for a motion CSV.
+    Ensures EXACTLY ONE 'd' after the second underscore.
+
+      airpods_motion_1760734866.csv   -> airpods_motion_d1760734866.csv
+      airpods_motion_d1760734866.csv  -> airpods_motion_d1760734866.csv
+      airpods_motion_dd1760734866.csv -> airpods_motion_d1760734866.csv
+
+    For other filenames, appends a single '_d' before the extension (idempotent).
     """
     folder, fname = os.path.split(csv_path)
-    parts = fname.split("_", 2)  # ["airpods", "motion", "1760734866.csv"]
+    parts = fname.split("_", 2)  # e.g. ["airpods","motion","1760734866.csv"]
     if len(parts) >= 3:
-        new_fname = f"{parts[0]}_{parts[1]}_d{parts[2]}"
+        # Strip ANY number of leading 'd' chars from the tail, then re-add ONE 'd'
+        tail = parts[2]
+        tail = re.sub(r"^d+", "", tail)  # compress d's to zero, we'll add one back
+        new_fname = f"{parts[0]}_{parts[1]}_d{tail}"
     else:
+        # Generic fallback: normalize to a single '_d' suffix before extension
         base, ext = os.path.splitext(fname)
+        base = re.sub(r"_d+$", "", base)  # drop any trailing '_d' run
         new_fname = f"{base}_d{ext or '.csv'}"
     return os.path.join(folder, new_fname)
 
@@ -662,6 +672,10 @@ def _upright_segments(events_df: pd.DataFrame, t_end: float) -> List[Tuple[float
             segments.append((float(s), float(e)))
     return segments
 
+def is_delta_motion_file(path: str) -> bool:
+    """True if this looks like a delta motion csv (airpods_motion_d*.csv)."""
+    return os.path.basename(path).startswith("airpods_motion_d")
+
 def calculate_deltas(
     df_imu: pd.DataFrame,
     *,
@@ -690,16 +704,6 @@ def calculate_deltas(
     scope="global":
         One baseline per channel = aggregate over ALL upright windows (fallback: whole file).
         Apply everywhere.
-
-    Returns
-    -------
-    df_delta : DataFrame
-        Copy of df_imu with numeric (non-id) columns baseline-subtracted.
-        If add_epoch_id=True, includes an 'epoch_id' column (-1 for gap/global rows).
-    baseline : dict
-        The global upright baseline used (still useful for inspection/fallbacks).
-    windows : list[(start, end)]
-        Upright-only windows used to compute per-epoch baselines (and the global one).
     """
     # --- detect timestamp column if not provided ---
     if not timestamp_col:
@@ -733,12 +737,17 @@ def calculate_deltas(
         windows = _extract_upright_windows(events_df, t_end=t_end, min_window_seconds=min_window_seconds)
         segments = _upright_segments(events_df, t_end=t_end)
 
-    # Columns to delta-transform
+    # ---- identify quaternion columns (case-insensitive) ----
+    quat_lower = {"quat_x", "quat_y", "quat_z", "quat_w"}
+    lower_map = {c.lower(): c for c in df_imu.columns}
+    quat_cols_present = [lower_map[q] for q in quat_lower if q in lower_map]
+
+    # Columns to delta-transform (exclude timestamp/id + quats)
     if id_cols is None:
         id_cols = [timestamp_col]
     id_set = set(id_cols)
     numeric_cols = df_imu.select_dtypes(include=[np.number]).columns.tolist()
-    delta_cols = [c for c in numeric_cols if c not in id_set]
+    delta_cols = [c for c in numeric_cols if c not in id_set and c not in quat_cols_present]
 
     def agg(df_sub: pd.DataFrame) -> Dict[str, float]:
         if not delta_cols:
@@ -764,6 +773,9 @@ def calculate_deltas(
             b = global_baseline.get(c, 0.0)
             if pd.notna(b):
                 df_delta[c] = df_delta[c] - b
+        # remove quaternion columns from the delta output
+        if quat_cols_present:
+            df_delta.drop(columns=quat_cols_present, inplace=True, errors="ignore")
         if add_epoch_id:
             df_delta["epoch_id"] = -1
         if verbose:
@@ -813,7 +825,10 @@ def calculate_deltas(
                 b = global_baseline.get(c, 0.0)
                 if pd.notna(b):
                     df_delta.loc[m_gap, c] = df_delta.loc[m_gap, c] - b
-            # epoch_ids for gaps remain -1
+
+    # remove quaternion columns from the delta output
+    if quat_cols_present:
+        df_delta.drop(columns=quat_cols_present, inplace=True, errors="ignore")
 
     if add_epoch_id:
         df_delta["epoch_id"] = epoch_ids
@@ -825,6 +840,7 @@ def calculate_deltas(
               f"Transformed {len(delta_cols)} channels. Time='{timestamp_col}'.")
 
     return df_delta, global_baseline, windows
+
 ############################
 
 def edit_csv():
@@ -841,7 +857,7 @@ def edit_csv():
         return
 
     for folder_path in folders:
-        imu_glob = os.path.join(folder_path, "airpods_motion_*.csv")
+        imu_glob = os.path.join(folder_path, "airpods_motion_[0-9]*.csv")
         imu_files = sorted(glob.glob(imu_glob))
         if not imu_files:
             print(f"⚠️ No IMU CSVs in {folder_path}")
@@ -870,15 +886,17 @@ def edit_csv():
             ### NEW FILE WITH DELTA CALCULATION ###
 
             try:
+                out_csv = make_delta_csv_path(csv_path)   # always "..._d<rest>.csv"
                 df_delta, _, _ = calculate_deltas(
                     df_imu,
                     csv_path=csv_path,
-                    id_cols=[_detect_timestamp_col(df_imu), "quat_x", "quat_y", "quat_z", "quat_w"],
+                    # keep quats as id_cols if desired:
+                    # id_cols=[_detect_timestamp_col(df_imu), "quat_x", "quat_y", "quat_z", "quat_w"],
+                    baseline_method="mean",
                     min_window_seconds=1.0,
                     verbose=False
                 )
-                out_csv = make_delta_csv_path(csv_path)
-                df_delta.to_csv(out_csv, index=False)
+                df_delta.to_csv(out_csv, index=False)  # creates if missing, overwrites if exists
             except Exception as e:
                 print(f"⚠️ Delta conversion skipped for: {csv_path}\n   ↳ {e}")
 
@@ -1247,7 +1265,7 @@ def X_and_y(type, list_comb):
             continue
 
         event_files = glob.glob(os.path.join(folder_path, 'events_inferred_*.csv'))
-        imu_files   = glob.glob(os.path.join(folder_path, 'airpods_motion_dd*.csv'))
+        imu_files   = glob.glob(os.path.join(folder_path, 'airpods_motion_d*.csv'))
         if not event_files or not imu_files:
             print(f"⚠️ Missing files in {folder_path}")
             continue

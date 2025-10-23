@@ -53,7 +53,7 @@ def tcn_block(x, filters, k, dropout, l2, dilation):
                       kernel_regularizer=regularizers.l2(l2))(x)
     y = layers.BatchNormalization()(y)
     y = layers.Activation("relu")(y)
-    #y = layers.Dropout(dropout)(y)
+    y = layers.Dropout(dropout)(y)
     y = layers.SpatialDropout1D(dropout)(y)
 
     y = layers.Conv1D(filters, k, padding="causal", dilation_rate=dilation,
@@ -80,8 +80,8 @@ def blocks_for_full_rf(seq_len, k, max_blocks=12):
 
 # ---------- Train/Eval wrapper ----------
 def train_eval_tcn(X_train, y_train, X_val, y_val, verbose,
-                   *, kernel_size=5, base_filters=96, dropout=0.10, l2=8e-4,
-                   batch_size=64, max_epochs=1000, n_classes=3):
+                   *, kernel_size=7, base_filters=64, dropout=0.10, l2=8e-4,
+                   max_epochs=1000, n_classes=3):
     tf.keras.utils.set_random_seed(42)
 
     # Shapes & dtypes
@@ -144,7 +144,7 @@ def train_eval_tcn(X_train, y_train, X_val, y_val, verbose,
         X_train_shuffled, y_train_shuffled,
         validation_data=(X_val, y_val),
         epochs=max_epochs,
-        batch_size=batch_size,
+        batch_size=128,
         shuffle=False,
         callbacks=callbacks,
         verbose=verbose,

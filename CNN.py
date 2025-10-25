@@ -135,7 +135,7 @@ def CNN_model(X_train, y_train, X_val, y_val, verbose, n_classes=3):
     y_train = y_train.squeeze().astype("int32")
     y_val   = y_val.squeeze().astype("int32")
 
-    l2 = regularizers.l2(8e-4)
+    l2 = regularizers.l2(2e-3)
 
     # Per-feature normalization (fit on train only)
     norm = layers.Normalization(axis=-1)
@@ -144,30 +144,24 @@ def CNN_model(X_train, y_train, X_val, y_val, verbose, n_classes=3):
     # used to be: 32, 64, 96
     cnn = models.Sequential([
         layers.Input(shape=(T, n_ch)),
-        layers.Normalization(axis=-1),
-        layers.SpatialDropout1D(0.15),
-
-        layers.Conv1D(16, 9, padding="causal", use_bias=False, kernel_regularizer=l2),
-        layers.BatchNormalization(), layers.Activation("relu"),
+        norm,
+        layers.Conv1D(24, 9, padding="causal", activation="relu", kernel_regularizer=l2),
         layers.MaxPooling1D(2),
 
-        layers.Conv1D(32, 7, padding="causal", use_bias=False, kernel_regularizer=l2),
-        layers.BatchNormalization(), layers.Activation("relu"),
-        layers.SpatialDropout1D(0.15),
+        layers.Conv1D(36, 7,  padding="causal", activation="relu", kernel_regularizer=l2),
         layers.MaxPooling1D(2),
 
-        layers.Conv1D(64, 5, padding="causal", use_bias=False, kernel_regularizer=l2),
-        layers.BatchNormalization(), layers.Activation("relu"),
+        layers.Conv1D(64, 5,  padding="causal", activation="relu", kernel_regularizer=l2),
         layers.MaxPooling1D(2),
-
+        
         layers.GlobalAveragePooling1D(),
-        layers.Dropout(0.40),
-        layers.Dense(32, activation="relu", kernel_regularizer=l2),
         layers.Dropout(0.30),
-        layers.Dense(n_classes, activation="softmax"),
+        layers.Dense(64, activation="relu", kernel_regularizer=l2),
+        layers.Dropout(0.20),
+        layers.Dense(n_classes, activation="softmax")   # 3 logits -> probs
     ])
     ## These metrices are then shown in the cnn.eval on X_val and y_val
-    loss = WeightedSparseCCE(class_weights=[0.8, 1.0, 1.15], from_logits=False)
+    loss = WeightedSparseCCE(class_weights=[0.5, 1.0, 1.15], from_logits=False)
 
     cnn.compile(
         loss=loss,

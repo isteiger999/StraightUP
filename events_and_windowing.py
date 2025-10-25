@@ -682,8 +682,8 @@ def calculate_deltas(
     csv_path: Optional[str] = None,
     events_path: Optional[str] = None,
     timestamp_col: Optional[str] = None,   # auto-detected if None
-    id_cols: Optional[List[str]] = None,   # preserved (not baseline-subtracted)
-    baseline_method: str = "mean",         # "mean" or "median"
+    id_cols: Optional[List[str]] = None,   # preserved (not baseline-subtracted) for NUMERIC channels
+    baseline_method: str = "mean",         # "mean" or "median" for NUMERIC channels
     min_window_seconds: float = 0.5,
     scope: str = "per_upright_epoch",      # default: per-epoch rebaselining
     apply_global_to_gaps: bool = True,     # apply global upright baseline outside epochs
@@ -692,26 +692,91 @@ def calculate_deltas(
     verbose: bool = True
 ) -> Tuple[pd.DataFrame, Dict[str, float], List[Tuple[float, float]]]:
     """
-    Convert IMU channels to deltas relative to an upright baseline.
+    Convert IMU channels to per-epoch deltas AND compute per-epoch relative quaternions.
 
-    scope="per_upright_epoch" (default):
-        For each UPRIGHT_HOLD_START at time u_i:
-          • Baseline = aggregate (mean/median) over the upright-only window that begins at u_i
-            and ends at the next SLOUCH_START or next UPRIGHT_HOLD_START (whichever comes first).
-          • Apply that baseline to the entire epoch [u_i, u_{i+1}) (upright + following slouch).
-        Rows not covered by any epoch receive the global upright baseline if apply_global_to_gaps=True.
+    - Non-quaternion numeric columns: baseline-subtracted per epoch (or globally in gaps).
+    - Quaternions: replaced by relative quaternions (quat_rel_x/y/z/w), computed as:
+          quat_rel = quat_sample ⊗ conj(q_base_epoch)
+      where q_base_epoch is the (unit) mean quaternion over the upright-only window
+      that starts at each UPRIGHT_HOLD_START. For gaps, uses a global upright q_base.
+      Sign continuity is enforced within each block and across adjacent blocks.
 
-    scope="global":
-        One baseline per channel = aggregate over ALL upright windows (fallback: whole file).
-        Apply everywhere.
+    Returned df contains quat_rel_* and DOES NOT contain the raw quat_* columns.
     """
-    # --- detect timestamp column if not provided ---
+
+    # ---------------- helpers: quaternion math ----------------
+    def _has_quats(df: pd.DataFrame) -> Tuple[bool, List[str]]:
+        qnames = {"quat_x", "quat_y", "quat_z", "quat_w"}
+        lower_map = {c.lower(): c for c in df.columns}
+        present = [lower_map[name] for name in qnames if name in lower_map]
+        return (len(present) == 4, present)
+
+    def _q_normalize(q: np.ndarray) -> np.ndarray:
+        # q: (..., 4) in (x, y, z, w) order
+        eps = 1e-12
+        n = np.linalg.norm(q, axis=-1, keepdims=True)
+        n = np.where(n < eps, 1.0, n)
+        return q / n
+
+    def _q_conj(q: np.ndarray) -> np.ndarray:
+        qc = q.copy()
+        qc[..., 0:3] *= -1.0  # negate vector part (x,y,z), keep w
+        return qc
+
+    def _q_mul(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
+        """
+        Multiply quaternions in (x,y,z,w) form: q = q1 ⊗ q2
+        """
+        x1, y1, z1, w1 = q1[..., 0], q1[..., 1], q1[..., 2], q1[..., 3]
+        x2, y2, z2, w2 = q2[..., 0], q2[..., 1], q2[..., 2], q2[..., 3]
+        w = w1*w2 - (x1*x2 + y1*y2 + z1*z2)
+        x = w1*x2 + w2*x1 + (y1*z2 - z1*y2)
+        y = w1*y2 + w2*y1 + (z1*x2 - x1*z2)
+        z = w1*z2 + w2*z1 + (x1*y2 - y1*x2)
+        out = np.stack([x, y, z, w], axis=-1)
+        return _q_normalize(out)
+
+    def _q_mean(qs: np.ndarray) -> Optional[np.ndarray]:
+        """
+        Approximate mean quaternion (Markley-style, sign aligned to first).
+        qs: (N,4) with possible NaNs; returns (4,) unit quat or None if insufficient data.
+        """
+        if qs.size == 0:
+            return None
+        # drop rows with any NaN
+        mask = ~np.isnan(qs).any(axis=1)
+        qs = qs[mask]
+        if qs.shape[0] == 0:
+            return None
+        qs = _q_normalize(qs)
+
+        # align signs to the first quaternion's hemisphere
+        q0 = qs[0]
+        dots = np.sum(qs * q0, axis=1)
+        qs[dots < 0] *= -1.0
+
+        q_mean = np.mean(qs, axis=0)
+        q_mean = _q_normalize(q_mean)
+        return q_mean
+
+    def _ensure_continuity(qs: np.ndarray) -> np.ndarray:
+        """
+        Flip sign to enforce continuity along time: qs[i] ~ qs[i-1].
+        In-place safe; returns qs for convenience.
+        """
+        if qs.shape[0] == 0:
+            return qs
+        for i in range(1, qs.shape[0]):
+            if np.dot(qs[i], qs[i - 1]) < 0:
+                qs[i] *= -1.0
+        return qs
+
+    # ---------------- detect timestamp & events ----------------
     if not timestamp_col:
         timestamp_col = _detect_timestamp_col(df_imu)
     if not timestamp_col or timestamp_col not in df_imu.columns:
         raise ValueError("Could not detect a timestamp column (looked for 't_sec', 'timestamp', 'time', ...).")
 
-    # Identify events file (auto-pick best overlap in same folder when not given)
     ev_path = events_path
     if ev_path is None and csv_path is not None:
         ev_path = _choose_events_file_for(csv_path, df_imu, timestamp_col=timestamp_col)
@@ -723,112 +788,213 @@ def calculate_deltas(
         except Exception:
             events_df = None
 
-    # Time vector & boundaries
+    # ---------------- time vector & epochs ----------------
     t_series = pd.to_numeric(df_imu[timestamp_col], errors="coerce").dropna()
     if t_series.empty:
         raise ValueError(f"Timestamp column '{timestamp_col}' contains no numeric values.")
-    t_min = float(t_series.min()); t_end = float(t_series.max())
+    t_end = float(t_series.max())
     t = pd.to_numeric(df_imu[timestamp_col], errors="coerce").values
 
-    # Upright-only windows (for baselines) and epoch segments (for application)
     windows: List[Tuple[float, float]] = []
     segments: List[Tuple[float, float]] = []
     if events_df is not None and not events_df.empty:
         windows = _extract_upright_windows(events_df, t_end=t_end, min_window_seconds=min_window_seconds)
         segments = _upright_segments(events_df, t_end=t_end)
 
-    # ---- identify quaternion columns (case-insensitive) ----
-    quat_lower = {"quat_x", "quat_y", "quat_z", "quat_w"}
-    lower_map = {c.lower(): c for c in df_imu.columns}
-    quat_cols_present = [lower_map[q] for q in quat_lower if q in lower_map]
-
-    # Columns to delta-transform (exclude timestamp/id + quats)
+    # ---------------- columns ----------------
+    has_quat, quat_cols = _has_quats(df_imu)  # raw quaternion column names (in original case)
     if id_cols is None:
         id_cols = [timestamp_col]
     id_set = set(id_cols)
     numeric_cols = df_imu.select_dtypes(include=[np.number]).columns.tolist()
-    delta_cols = [c for c in numeric_cols if c not in id_set and c not in quat_cols_present]
+    # non-quaternion numeric columns to subtract deltas from
+    delta_cols = [c for c in numeric_cols if c not in id_set and (not has_quat or c not in quat_cols)]
 
-    def agg(df_sub: pd.DataFrame) -> Dict[str, float]:
+    # ---------------- numeric baseline aggregator ----------------
+    def _agg_numeric(df_sub: pd.DataFrame) -> Dict[str, float]:
         if not delta_cols:
             return {}
         if baseline_method == "median":
             return df_sub[delta_cols].median(numeric_only=True).to_dict()
         return df_sub[delta_cols].mean(numeric_only=True).to_dict()
 
-    # Global upright baseline (used for gaps and as fallback)
+    # ---------------- global numeric & quaternion baselines ----------------
     if windows:
         mask_upright_all = np.zeros(len(df_imu), dtype=bool)
         for (s, e) in windows:
             mask_upright_all |= (t >= s) & (t < e)
-        global_baseline = agg(df_imu.loc[mask_upright_all]) if mask_upright_all.any() else agg(df_imu)
+        global_numeric_baseline = _agg_numeric(df_imu.loc[mask_upright_all]) if mask_upright_all.any() else _agg_numeric(df_imu)
+        if has_quat:
+            Q_all = df_imu.loc[mask_upright_all, quat_cols].to_numpy(dtype=float) if mask_upright_all.any() \
+                    else df_imu[quat_cols].to_numpy(dtype=float)
+            q_base_global = _q_mean(Q_all)
+        else:
+            q_base_global = None
     else:
-        global_baseline = agg(df_imu)
+        global_numeric_baseline = _agg_numeric(df_imu)
+        if has_quat:
+            Q_all = df_imu[quat_cols].to_numpy(dtype=float)
+            q_base_global = _q_mean(Q_all)
+        else:
+            q_base_global = None
 
     df_delta = df_imu.copy()
 
-    # --- scope: global (simple path) ---
+    # ---------------- scope: GLOBAL (simple path) ----------------
     if scope == "global" or not segments or events_df is None or events_df.empty:
+        # numeric deltas
         for c in delta_cols:
-            b = global_baseline.get(c, 0.0)
+            b = global_numeric_baseline.get(c, 0.0)
             if pd.notna(b):
                 df_delta[c] = df_delta[c] - b
-        # remove quaternion columns from the delta output
-        if quat_cols_present:
-            df_delta.drop(columns=quat_cols_present, inplace=True, errors="ignore")
+
+        # relative quaternions (global baseline)
+        if has_quat and q_base_global is not None:
+            Q = df_imu[quat_cols].to_numpy(dtype=float)
+            # handle NaNs per-row
+            valid = ~np.isnan(Q).any(axis=1)
+            Qn = _q_normalize(Q[valid])
+            q_base_conj = _q_conj(_q_normalize(q_base_global))
+            Qrel = _q_mul(Qn, q_base_conj)
+            Qrel = _ensure_continuity(Qrel)  # continuity across the whole file
+            # write out
+            rel_cols = ["quat_rel_x", "quat_rel_y", "quat_rel_z", "quat_rel_w"]
+            for i, name in enumerate(rel_cols):
+                df_delta[name] = np.nan
+                df_delta.loc[valid, name] = Qrel[:, i]
+            # drop raw quats
+            df_delta.drop(columns=quat_cols, inplace=True, errors="ignore")
+
         if add_epoch_id:
             df_delta["epoch_id"] = -1
+
         if verbose:
             source = "upright_windows" if windows else "global"
             print(f"Δ-baseline: {baseline_method} / global from {source} "
                   f"(windows={len(windows)}, samples_used={len(df_imu)}). "
-                  f"Transformed {len(delta_cols)} channels. Time='{timestamp_col}'.")
-        return df_delta, global_baseline, windows
+                  f"Transformed {len(delta_cols)} channels. Quat_rel={'yes' if has_quat else 'no'}. "
+                  f"Time='{timestamp_col}'.")
+        return df_delta, global_numeric_baseline, windows
 
-    # --- scope: per_upright_epoch ---
+    # ---------------- scope: PER-UPRIGHT-EPOCH ----------------
     baseline_window_by_start: Dict[float, Tuple[float, float]] = {s: (s, e) for (s, e) in windows}
     touched = np.zeros(len(df_imu), dtype=bool)
-    epoch_ids = np.full(len(df_imu), -1, dtype=int)  # -1 = not in any epoch
-    last_baseline_vals: Optional[Dict[str, float]] = None
+    epoch_ids = np.full(len(df_imu), -1, dtype=int)
+    last_numeric_baseline: Optional[Dict[str, float]] = None
+    last_q_base: Optional[np.ndarray] = None
     epochs_applied = 0
 
+    # Prepare output columns for relative quaternions
+    if has_quat:
+        rel_cols = ["quat_rel_x", "quat_rel_y", "quat_rel_z", "quat_rel_w"]
+        for name in rel_cols:
+            df_delta[name] = np.nan
+        last_rel_tail: Optional[np.ndarray] = None  # for sign continuity across blocks
+
     for epoch_idx, (seg_start, seg_end) in enumerate(segments):
-        # Baseline window for this epoch (upright-only)
+        # ----- numeric baseline for this epoch -----
         bw = baseline_window_by_start.get(seg_start)
         if bw is not None:
             b_start, b_end = bw
             m_b = (t >= b_start) & (t < b_end)
             if m_b.any():
-                baseline_vals = agg(df_imu.loc[m_b])
-                last_baseline_vals = baseline_vals
+                numeric_baseline = _agg_numeric(df_imu.loc[m_b])
+                last_numeric_baseline = numeric_baseline
             else:
-                baseline_vals = last_baseline_vals if (reuse_last_baseline and last_baseline_vals is not None) else global_baseline
+                numeric_baseline = last_numeric_baseline if (reuse_last_baseline and last_numeric_baseline is not None) else global_numeric_baseline
         else:
-            baseline_vals = last_baseline_vals if (reuse_last_baseline and last_baseline_vals is not None) else global_baseline
+            numeric_baseline = last_numeric_baseline if (reuse_last_baseline and last_numeric_baseline is not None) else global_numeric_baseline
 
-        # Apply baseline to the entire epoch [seg_start, seg_end)
+        # apply numeric to the entire epoch
         m_seg = (t >= seg_start) & (t < seg_end)
-        if m_seg.any():
+        if m_seg.any() and delta_cols:
             for c in delta_cols:
-                b = baseline_vals.get(c, 0.0)
+                b = numeric_baseline.get(c, 0.0)
                 if pd.notna(b):
                     df_delta.loc[m_seg, c] = df_delta.loc[m_seg, c] - b
+
+        # ----- quaternion baseline & relative for this epoch -----
+        if has_quat:
+            # compute q_base for this epoch from upright-only window
+            q_base_epoch = None
+            if bw is not None and m_b.any():
+                Qb = df_imu.loc[m_b, quat_cols].to_numpy(dtype=float)
+                q_base_epoch = _q_mean(Qb)
+                if q_base_epoch is not None:
+                    last_q_base = q_base_epoch
+            if q_base_epoch is None:
+                # reuse last or global
+                q_base_epoch = last_q_base if (reuse_last_baseline and last_q_base is not None) else q_base_global
+
+            if q_base_epoch is not None and m_seg.any():
+                idx = np.where(m_seg)[0]
+                Qseg = df_imu.loc[m_seg, quat_cols].to_numpy(dtype=float)
+                valid = ~np.isnan(Qseg).any(axis=1)
+                if np.any(valid):
+                    Qn = _q_normalize(Qseg[valid])
+                    q_base_conj = _q_conj(_q_normalize(q_base_epoch))
+                    Qrel = _q_mul(Qn, q_base_conj)
+
+                    # sign continuity inside the epoch
+                    Qrel = _ensure_continuity(Qrel)
+
+                    # align epoch start to previous block for cross-block continuity
+                    if last_rel_tail is not None and Qrel.shape[0] > 0:
+                        if np.dot(Qrel[0], last_rel_tail) < 0:
+                            Qrel *= -1.0
+
+                    # write back
+                    for j, name in enumerate(rel_cols):
+                        df_delta.loc[m_seg, name] = df_delta.loc[m_seg, name].astype(float)  # ensure dtype
+                        df_delta.loc[m_seg, name] = df_delta.loc[m_seg, name].to_numpy()  # no-op, dtype guard
+                        arr = df_delta.loc[m_seg, name].to_numpy()
+                        arr[:] = np.nan  # reset slice
+                        arr[valid] = Qrel[:, j]
+                        df_delta.loc[m_seg, name] = arr
+
+                    # remember last rel value for cross-block continuity
+                    last_rel_tail = Qrel[-1].copy()
+
+        if m_seg.any():
             touched |= m_seg
             epoch_ids[m_seg] = epoch_idx
             epochs_applied += 1
 
-    # Apply global upright baseline to gaps (outside any epoch)
+    # ----- gaps: numeric & quaternion with global baseline -----
     if apply_global_to_gaps:
         m_gap = ~touched
-        if m_gap.any():
+        if np.any(m_gap):
+            # numeric
             for c in delta_cols:
-                b = global_baseline.get(c, 0.0)
+                b = global_numeric_baseline.get(c, 0.0)
                 if pd.notna(b):
                     df_delta.loc[m_gap, c] = df_delta.loc[m_gap, c] - b
+            # quaternion
+            if has_quat and q_base_global is not None:
+                idx = np.where(m_gap)[0]
+                Qgap = df_imu.loc[m_gap, quat_cols].to_numpy(dtype=float)
+                valid = ~np.isnan(Qgap).any(axis=1)
+                if np.any(valid):
+                    Qn = _q_normalize(Qgap[valid])
+                    Qrel = _q_mul(Qn, _q_conj(_q_normalize(q_base_global)))
+                    Qrel = _ensure_continuity(Qrel)
+                    # align gap start with previous tail
+                    if 'last_rel_tail' in locals() and last_rel_tail is not None and Qrel.shape[0] > 0:
+                        if np.dot(Qrel[0], last_rel_tail) < 0:
+                            Qrel *= -1.0
+                    rel_cols = ["quat_rel_x", "quat_rel_y", "quat_rel_z", "quat_rel_w"]
+                    for j, name in enumerate(rel_cols):
+                        df_delta.loc[m_gap, name] = df_delta.loc[m_gap, name].astype(float) if name in df_delta.columns else np.nan
+                        # assign
+                        col = df_delta.loc[m_gap, name].to_numpy() if name in df_delta.columns else np.full(np.sum(m_gap), np.nan)
+                        col[:] = np.nan
+                        col[valid] = Qrel[:, j]
+                        df_delta.loc[m_gap, name] = col
+                    last_rel_tail = Qrel[-1].copy()
 
-    # remove quaternion columns from the delta output
-    if quat_cols_present:
-        df_delta.drop(columns=quat_cols_present, inplace=True, errors="ignore")
+    # ----- drop raw quaternion columns; keep only quat_rel_* -----
+    if has_quat:
+        df_delta.drop(columns=quat_cols, inplace=True, errors="ignore")
 
     if add_epoch_id:
         df_delta["epoch_id"] = epoch_ids
@@ -837,9 +1003,10 @@ def calculate_deltas(
         print(f"Δ-baseline: {baseline_method} / per_upright_epoch "
               f"(epochs_applied={epochs_applied}, windows={len(windows)}). "
               f"Gaps->global={apply_global_to_gaps}. "
-              f"Transformed {len(delta_cols)} channels. Time='{timestamp_col}'.")
+              f"Transformed {len(delta_cols)} numeric channels; "
+              f"Quat_rel={'yes' if has_quat else 'no'}. Time='{timestamp_col}'.")
 
-    return df_delta, global_baseline, windows
+    return df_delta, global_numeric_baseline, windows
 
 ############################
 

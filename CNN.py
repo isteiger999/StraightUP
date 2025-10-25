@@ -144,24 +144,30 @@ def CNN_model(X_train, y_train, X_val, y_val, verbose, n_classes=3):
     # used to be: 32, 64, 96
     cnn = models.Sequential([
         layers.Input(shape=(T, n_ch)),
-        norm,
-        layers.Conv1D(24, 9, padding="causal", activation="relu", kernel_regularizer=l2),
+        layers.Normalization(axis=-1),
+        layers.SpatialDropout1D(0.15),
+
+        layers.Conv1D(16, 9, padding="causal", use_bias=False, kernel_regularizer=l2),
+        layers.BatchNormalization(), layers.Activation("relu"),
         layers.MaxPooling1D(2),
 
-        layers.Conv1D(48, 7,  padding="causal", activation="relu", kernel_regularizer=l2),
+        layers.Conv1D(32, 7, padding="causal", use_bias=False, kernel_regularizer=l2),
+        layers.BatchNormalization(), layers.Activation("relu"),
+        layers.SpatialDropout1D(0.15),
         layers.MaxPooling1D(2),
 
-        layers.Conv1D(96, 5,  padding="causal", activation="relu", kernel_regularizer=l2),
+        layers.Conv1D(64, 5, padding="causal", use_bias=False, kernel_regularizer=l2),
+        layers.BatchNormalization(), layers.Activation("relu"),
         layers.MaxPooling1D(2),
-        
+
         layers.GlobalAveragePooling1D(),
+        layers.Dropout(0.40),
+        layers.Dense(32, activation="relu", kernel_regularizer=l2),
         layers.Dropout(0.30),
-        layers.Dense(64, activation="relu", kernel_regularizer=l2),
-        layers.Dropout(0.20),
-        layers.Dense(n_classes, activation="softmax")   # 3 logits -> probs
+        layers.Dense(n_classes, activation="softmax"),
     ])
     ## These metrices are then shown in the cnn.eval on X_val and y_val
-    loss = WeightedSparseCCE(class_weights=[0.5, 1.0, 1.2], from_logits=False)
+    loss = WeightedSparseCCE(class_weights=[0.8, 1.0, 1.15], from_logits=False)
 
     cnn.compile(
         loss=loss,
@@ -176,7 +182,10 @@ def CNN_model(X_train, y_train, X_val, y_val, verbose, n_classes=3):
     
     callbacks = [
         tf.keras.callbacks.EarlyStopping(
-            monitor="val_loss", mode="min", patience=15, restore_best_weights=True  #val_recall_slouched, val_BA_no_upr
+            monitor="val_BA_no_upr", mode="max", patience=15, restore_best_weights=True  #val_recall_slouched, val_BA_no_upr
+        ),
+        tf.keras.callbacks.ModelCheckpoint("best_by_BA.weights.h5", save_weights_only=True, save_best_only=True,
+            monitor="val_BA_no_upr", mode="max"
         ),
         tf.keras.callbacks.ReduceLROnPlateau(
             monitor="val_loss", mode="min", factor=0.5, patience=6, min_lr=1e-5

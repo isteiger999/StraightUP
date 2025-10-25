@@ -386,8 +386,8 @@ def find_combinations(names: List[str], fraction: float = 1.0) -> Tuple[Dict[int
         random.shuffle(perms)
         combinations = {i: p for i, p in enumerate(perms)}
 
-    mean = {"loss": 0.0, "balanced_acc": 0.0}
-    std = {"loss": 0.0, "balanced_acc": 0.0}
+    mean = {"loss": 0.0, "BA_no_upr": 0.0, "rec_sl": 0.0, "rec_trans": 0.0}
+    std = {"loss": 0.0, "BA_no_upr": 0.0, "rec_sl": 0.0, "rec_trans": 0.0}
     return combinations, mean, std
 
 def fix_length(df_imu: pd.DataFrame, target_len: int = 18_000,
@@ -1003,20 +1003,17 @@ def label_at_time(t, names, times, m):
     # default
     return 0
 
+#---- Confusion Matrix
 class ConfusionMatrixAverager:
     """
     Accumulates raw confusion matrices over multiple runs and saves
-    a single averaged confusion matrix as a PNG.
+    a single averaged confusion matrix as a PNG (always full n_classes x n_classes).
 
-    - Uses raw counts per run (no normalization) and sums them.
-      The final figure can be normalized in different ways for display:
+    Display normalization:
         * normalize="true":  rows sum to 1 (per-true-class recall)
         * normalize="pred":  columns sum to 1 (per-predicted-class precision)
         * normalize="all":   entire matrix sums to 1
         * normalize=None:    raw counts
-
-      Summing raw counts corresponds to pooling all test samples across runs,
-      which is robust when each split has different class supports.
 
     Parameters
     ----------
@@ -1037,7 +1034,7 @@ class ConfusionMatrixAverager:
         self.class_names = list(class_names) if class_names is not None else None
         self.save_dir = save_dir
 
-        self._cm_counts = None  # will be np.ndarray[n_classes, n_classes]
+        self._cm_counts = None  # np.ndarray[n_classes, n_classes]
         self._runs = 0
 
     # ---------- public API ----------
@@ -1056,17 +1053,13 @@ class ConfusionMatrixAverager:
         """
         model = getattr(history, "model", None)
         if model is None:
-            raise ValueError(
-                "The provided 'history' has no .model; pass the History returned by model.fit(...)."
-            )
+            raise ValueError("The provided 'history' has no .model; pass the History from model.fit(...).")
 
         X = np.asarray(X)
         y_true = np.asarray(y).squeeze().astype(np.int64)
 
-        # Initialize shapes/names lazily on first call
         self._ensure_initialized(history, y_true)
 
-        # Predict and compute raw-count confusion matrix for this run
         y_probs = model.predict(X, batch_size=batch_size, verbose=verbose)
         y_pred = np.argmax(y_probs, axis=-1).astype(np.int64)
 
@@ -1082,7 +1075,7 @@ class ConfusionMatrixAverager:
         return cm_counts
 
     def save_figure(self,
-                    model_tag: str = "tcn",
+                    model_tag: str = "cnn",
                     normalize: str = "true",  # "true", "pred", "all", or None
                     dpi: int = 220) -> str:
         """
@@ -1091,7 +1084,7 @@ class ConfusionMatrixAverager:
         Parameters
         ----------
         model_tag : {"tcn","cnn",...}
-            Used in the filename, e.g. tcn_19-10-2025_14-37.png.
+            Used in the filename, e.g. cnn_19-10-2025_14-37.png.
         normalize : {"true","pred","all",None}
             - "true": rows sum to 1 (per-class recall)
             - "pred": columns sum to 1 (per-class precision)
@@ -1109,7 +1102,8 @@ class ConfusionMatrixAverager:
             raise ValueError("No runs added. Call add(...) at least once before saving.")
 
         cm_plot = self._normalized(self._cm_counts, normalize=normalize)
-        balanced_acc = self._balanced_accuracy_from_counts(self._cm_counts)
+        ba_all = self._balanced_accuracy_from_counts(self._cm_counts)
+        ba_no_upr = self._balanced_accuracy_no_upright(self._cm_counts)  # uses rows 1 & 2 from full CM
 
         # Plot
         fig, ax = plt.subplots(figsize=(6.4, 5.6))
@@ -1129,13 +1123,17 @@ class ConfusionMatrixAverager:
                        "pred": "col-normalized",
                        "all":  "global-normalized",
                        None:   "counts" }.get(normalize, "row-normalized")
+
         title_top = f"Averaged Confusion Matrix ({model_tag.upper()})"
-        subtitle = f"Runs: {self._runs} • Balanced Acc: {balanced_acc*100:.1f}% • {norm_label}"
+        if self.n_classes >= 3:
+            subtitle = (f"Runs: {self._runs} • BA(all): {ba_all*100:.1f}% • "
+                        f"BA(no_upright: classes 1&2): {ba_no_upr*100:.1f}% • {norm_label}")
+        else:
+            subtitle = f"Runs: {self._runs} • BA(all): {ba_all*100:.1f}% • {norm_label}"
         ax.set_title(f"{title_top}\n{subtitle}")
 
         # Annotate each cell
         fmt = ".2f" if normalize is not None else "d"
-        # Use nanmax to avoid warnings when matrix may contain NaNs (e.g., empty rows after normalization)
         valid_max = np.nanmax(cm_plot) if np.any(np.isfinite(cm_plot)) else 0.0
         thresh = valid_max / 2.0
         for i in range(self.n_classes):
@@ -1148,7 +1146,7 @@ class ConfusionMatrixAverager:
 
         fig.tight_layout()
 
-        # Safe timestamp for filenames: dd-mm-yyyy_HH-MM (no seconds, filesystem-safe)
+        # Safe timestamp for filenames: dd-mm-yyyy_HH-MM (no seconds)
         timestamp = datetime.now().strftime("%d-%m-%Y_%H-%M")
         os.makedirs(self.save_dir, exist_ok=True)
         filename = f"{model_tag.lower()}_{timestamp}.png"
@@ -1160,14 +1158,12 @@ class ConfusionMatrixAverager:
 
     # ---------- helpers ----------
     def _ensure_initialized(self, history, y_true: np.ndarray):
-        # Infer n_classes from model output size if missing
         if self.n_classes is None:
             try:
                 self.n_classes = int(history.model.output_shape[-1])
             except Exception:
                 self.n_classes = int(np.max(y_true)) + 1
 
-        # Default class names
         if self.class_names is None:
             if self.n_classes == 3:
                 self.class_names = ["upright", "transition", "slouch"]
@@ -1184,11 +1180,10 @@ class ConfusionMatrixAverager:
                 cm[row_sums.squeeze() == 0] = 0.0
             return cm
         elif normalize == "pred":
-            # Column-normalize (per-class precision across predictions)
+            # Column-normalize (per-class precision)
             col_sums = cm_counts.sum(axis=0, keepdims=True).astype(np.float64)
             with np.errstate(divide="ignore", invalid="ignore"):
                 cm = np.divide(cm_counts, col_sums, where=col_sums > 0)
-                # For columns with zero predictions, keep zeros
                 zero_cols = (col_sums.squeeze() == 0)
                 if np.any(zero_cols):
                     cm[:, zero_cols] = 0.0
@@ -1201,7 +1196,7 @@ class ConfusionMatrixAverager:
 
     @staticmethod
     def _balanced_accuracy_from_counts(cm_counts: np.ndarray) -> float:
-        # Balanced accuracy = mean of per-class recall over classes with support > 0
+        """Balanced accuracy over ALL classes (mean row recall over rows with support > 0)."""
         row_sums = cm_counts.sum(axis=1).astype(np.float64)
         diag = np.diag(cm_counts).astype(np.float64)
         mask = row_sums > 0
@@ -1211,20 +1206,37 @@ class ConfusionMatrixAverager:
         recalls[mask] = diag[mask] / row_sums[mask]
         return float(np.mean(recalls[mask]))
 
+    @staticmethod
+    def _balanced_accuracy_no_upright(cm_counts: np.ndarray) -> float:
+        """
+        BA over classes 1 & 2 using the FULL matrix (no slicing/plotting subset).
+        Equivalent to mean([recall_class1, recall_class2]).
+        """
+        if cm_counts.shape[0] < 3:
+            return float("nan")
+        row_sums = cm_counts.sum(axis=1).astype(np.float64)
+        diag = np.diag(cm_counts).astype(np.float64)
+        mask12 = np.array([False, row_sums[1] > 0, row_sums[2] > 0])
+        recalls = np.zeros(3, dtype=np.float64)
+        # Safe division; if a class has no support, it contributes 0 and will be excluded in denom
+        recalls[1] = diag[1] / row_sums[1] if row_sums[1] > 0 else 0.0
+        recalls[2] = diag[2] / row_sums[2] if row_sums[2] > 0 else 0.0
+        denom = int(mask12[1]) + int(mask12[2])
+        return float((recalls[1] + recalls[2]) / denom) if denom > 0 else float("nan")
+
 def save_confusion_matrix_for_run(history, X, y,
-                                  model_tag: str = "tcn",
+                                  model_tag: str = "cnn",
                                   save_dir: str = "confusion_matrix",
                                   dpi: int = 220,
                                   normalize: str = "true") -> str:
     """
-    Convenience helper: compute & save a single-run confusion matrix.
-    (Internally just uses ConfusionMatrixAverager once.)
-
+    Convenience helper: compute & save a single-run confusion matrix (full matrix).
     Returns the PNG path.
     """
     cma = ConfusionMatrixAverager(save_dir=save_dir)
     cma.add(history, X, y)
     return cma.save_figure(model_tag=model_tag, dpi=dpi, normalize=normalize)
+#----------------------------  
 
 def find_shapes():
     # pick the first IMU file under data/*/

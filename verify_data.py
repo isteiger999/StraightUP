@@ -266,13 +266,13 @@ def plot_reconstructed_signal(
     return None
 
 def main():
-    X_train, y_train = X_and_y("train", ['Ivan', 'Dario', 'David', 'Claire', 'Mohid'])
+    X_train, y_train = X_and_y("train", ['Claire', 'Mohid', 'Dario', 'David', 'Ivan']) #['Ivan', 'Dario', 'David', 'Claire', 'Mohid']
     plot_reconstructed_signal(
         X_train, y_train,
         windows=75,
-        chanel=[4, 9],
-        num_windows=200,
-        start_window=0,
+        chanel=[11, 12],
+        num_windows=240,    #100
+        start_window=480,     #0, 240, 480
         show=True
     )
 

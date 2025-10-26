@@ -1113,61 +1113,96 @@ def individual_accuracy(model, X_test, y_test, classes=(0, 1, 2)):
         acc = float(np.mean(y_pred[mask] == y_true[mask]))
         print(f"Class {c}: Accuracy={acc:.3f} (n={n})")
 
+
+# --- New Version of function: label_at_time to clean data ---
 def label_at_time(t, names, times, m):
     """
-    3-class labeling at timestamp t with margin m (seconds).
+    3-class labeling at timestamp t with margin m (seconds) treated as *human delay*.
 
-    Emits transition (1) **only** for the slouch cycle:
-      UPRIGHT_HOLD_START  --(near next SLOUCH_START - m)-->  1
-      SLOUCH_START                                       --> 1
-      SLOUCHED_HOLD_START (first m sec)                  --> 1
-      SLOUCHED_HOLD_START (after  m sec)                 --> 2
-      RECOVERY_START *if recovering from a slouch hold*  --> 1
+    Intervals (inclusive on the left, exclusive on the right):
+        Upright (0):            UPRIGHT_HOLD_START + m → SLOUCH_START + m
+        Transition (1):         SLOUCH_START + m   → SLOUCHED_HOLD_START
+                                RECOVERY_START + m → next UPRIGHT_HOLD_START + 2*m
+        Slouched (2):           SLOUCHED_HOLD_START → RECOVERY_START + m
 
-    Non-slouch events ('NOSLOUCH_START', 'NOSLOUCHED_HOLD_START') never
-    yield transition or slouched; they are treated as upright (0).
+    Non-slouch markers ('NOSLOUCH_START', 'NOSLOUCHED_HOLD_START') are always upright (0).
+    Before the first event: upright (0). No anticipation around SLOUCH_START.
+
+    Parameters
+    ----------
+    t : float
+        Timestamp (seconds).
+    names : sequence of str
+        Event names, same length as `times`, sorted by time.
+    times : sequence of float
+        Event times (seconds), non-decreasing, same length as `names`.
+    m : float
+        Delay margin in seconds (>= 0).
+
+    Returns
+    -------
+    int in {0,1,2}
     """
-    # index of the last event at or before t
+    if len(names) != len(times):
+        raise ValueError("`names` and `times` must have the same length.")
+    times = np.asarray(times, dtype=float)
+    if len(times) and np.any(np.diff(times) < 0):
+        raise ValueError("`times` must be sorted in non-decreasing order.")
+    m = max(0.0, float(m))
+
+    # Index of last event at or before t
     k = int(np.searchsorted(times, t, side='right')) - 1
 
-    # before first event: only treat as transition if first event is SLOUCH_START
+    # Before first event -> upright (no anticipation)
     if k < 0:
-        if len(names) and names[0] == 'SLOUCH_START' and t >= times[0] - m:
-            return 1
         return 0
 
     prev_ev, prev_t = names[k], times[k]
-    next_ev = names[k+1] if (k + 1) < len(names) else None
-    next_t  = times[k+1]  if (k + 1) < len(times) else np.inf
-    prev_prev_ev = names[k-1] if (k - 1) >= 0 else None
+    next_ev = names[k + 1] if (k + 1) < len(names) else None
+    next_t  = times[k + 1] if (k + 1) < len(times) else np.inf
+    prev_prev_ev = names[k - 1] if (k - 1) >= 0 else None
 
-    # ---- Non-slouch events are always upright ----
-    if prev_ev in ('NOSLOUCH_START', 'NOSLOUCHED_HOLD_START'):
-        return 0
-
-    # ---- Slouch-cycle labeling ----
-    if prev_ev == 'UPRIGHT_HOLD_START':
-        # Only near an upcoming true SLOUCH_START do we call transition
-        if next_ev == 'SLOUCH_START' and t >= next_t - m:
-            return 1
-        return 0
-
-    if prev_ev == 'SLOUCH_START':
-        return 1
-
-    if prev_ev == 'SLOUCHED_HOLD_START':
-        # transition for m right after entering slouched, then slouched
+    if prev_ev == 'NOSLOUCH_START':
+    # Before the delay 'm' → upright
         if t < prev_t + m:
+            return 0
+        # After the delay, call it transition *only* if we are indeed in the no-slouch cycle
+        if next_ev == 'NOSLOUCHED_HOLD_START':
             return 1
+        return 0
+
+    if prev_ev == 'NOSLOUCHED_HOLD_START':
+        # For m seconds after NOSLOUCHED_HOLD_START, still transition (closing the interval)
+        if prev_prev_ev == 'NOSLOUCH_START' and t < prev_t + m:
+            return 1
+        return 0
+
+    # Upright hold (HERE)
+    if prev_ev == 'UPRIGHT_HOLD_START':
+        if prev_prev_ev == 'RECOVERY_START' and t < prev_t + 2*m:
+            return 1
+        return 0
+
+    # Start slouching: human delay keeps it upright for m seconds
+    if prev_ev == 'SLOUCH_START':
+        if t < prev_t + m:
+            return 0         # still upright during delay
+        return 1              # transition until SLOUCHED_HOLD_START (handled when prev_ev changes)
+
+    # Slouched hold: stays slouched until RECOVERY_START + m
+    if prev_ev == 'SLOUCHED_HOLD_START':
         return 2
 
+    # Recovery: remains slouched for m, then transition until next upright hold
     if prev_ev == 'RECOVERY_START':
-        # Transition only if we are recovering from a real slouch hold
-        if prev_prev_ev == 'SLOUCHED_HOLD_START':
-            return 1
-        return 0
+        # Guard: only treat as a recovery from a true slouch hold
+        if prev_prev_ev != 'SLOUCHED_HOLD_START':
+            return 0
+        if t < prev_t + m:
+            return 2          # still effectively slouched during delay
+        return 1              # transition out until next UPRIGHT_HOLD_START
 
-    # default
+    # Fallback: upright
     return 0
 
 #---- Confusion Matrix
@@ -1490,7 +1525,7 @@ def X_and_y(type, list_comb):
                 min_center_trans_frac=0.08     # ~6/75 frames
             )
         '''
-        m = 0.2
+        m = 0.3
         labels_array = np.zeros((windows_per_rec, 1), dtype=int)
         for i in range(windows_per_rec):
             current_time = t0 + len_window_sec + i * stride

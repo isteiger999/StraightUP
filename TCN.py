@@ -125,6 +125,52 @@ class BalancedAccuracySubset(tf.keras.metrics.Metric):
 
     def reset_state(self):
         self.tp.assign(tf.zeros_like(self.tp)); self.pos.assign(tf.zeros_like(self.pos))
+# ---------- F1 Score for upright class (combines recall and precision)
+class F1ForClass(tf.keras.metrics.Metric):
+    """
+    F1 score for a single class (hard predictions via argmax).
+    Use: F1ForClass(class_id=2, name="f1_sl")
+    """
+    def __init__(self, class_id, name=None, **kwargs):
+        super().__init__(name or f"f1_c{class_id}", **kwargs)
+        self.class_id = int(class_id)
+        self.tp = self.add_weight("tp", initializer="zeros")
+        self.fp = self.add_weight("fp", initializer="zeros")
+        self.fn = self.add_weight("fn", initializer="zeros")
+
+    def update_state(self, y_true, y_pred, sample_weight=None):
+        # y_true: integer labels [B] or [B,1]
+        y_true = tf.cast(tf.squeeze(y_true), tf.int32)
+        # y_pred: class probabilities/logits [B, C] -> hard preds via argmax
+        y_hat  = tf.cast(tf.argmax(y_pred, axis=-1), tf.int32)
+
+        pos_true = tf.equal(y_true, self.class_id)
+        pos_pred = tf.equal(y_hat,  self.class_id)
+
+        tp = tf.cast(tf.logical_and(pos_true, pos_pred), self.dtype)
+        fp = tf.cast(tf.logical_and(tf.logical_not(pos_true), pos_pred), self.dtype)
+        fn = tf.cast(tf.logical_and(pos_true, tf.logical_not(pos_pred)), self.dtype)
+
+        if sample_weight is not None:
+            sw = tf.cast(tf.reshape(sample_weight, (-1,)), self.dtype)
+            tp = sw * tp
+            fp = sw * fp
+            fn = sw * fn
+
+        self.tp.assign_add(tf.reduce_sum(tp))
+        self.fp.assign_add(tf.reduce_sum(fp))
+        self.fn.assign_add(tf.reduce_sum(fn))
+
+    def result(self):
+        eps = tf.keras.backend.epsilon()
+        return (2.0 * self.tp) / (2.0 * self.tp + self.fp + self.fn + eps)
+
+    def reset_state(self):
+        for v in (self.tp, self.fp, self.fn):
+            v.assign(0.0)
+
+# ----------
+
 # ---------- TCN building blocks ----------
 def tcn_block(x, filters, k, dropout, l2, dilation):
     y = layers.Conv1D(filters, k, padding="causal", dilation_rate=dilation,
@@ -190,21 +236,25 @@ def train_eval_tcn(X_train, y_train, X_val, y_val, verbose,
     y = layers.Dense(n_classes, activation="softmax")(x)
 
     model = models.Model(x_in, y)
-    loss = WeightedSparseCCE(class_weights=[0.5, 1.0, 1.2], from_logits=False)
+    loss = WeightedSparseCCE(class_weights=[0.8, 1.0, 1.15], from_logits=False)
     model.compile(
         loss=loss,
-        optimizer=tf.keras.optimizers.legacy.Adam(5e-4), 
+        optimizer=tf.keras.optimizers.legacy.Adam(5e-4),
         metrics=[
-            #BalancedAccuracy(n_classes=n_classes, name="balanced_acc"),
             BalancedAccuracySubset(include=(1,2), n_classes=n_classes, name="BA_no_upr"),
             RecallForClass(class_id=2, n_classes=n_classes, name="rec_sl"),
-            RecallForClass(class_id=1, n_classes=n_classes, name="rec_trans")
-        ]
+            RecallForClass(class_id=1, n_classes=n_classes, name="rec_trans"),
+            F1ForClass(class_id=2, name="f1_sl"),  
+        ],
     )
 
     callbacks = [
         tf.keras.callbacks.EarlyStopping(
-            monitor="val_loss", mode="min", patience=15, restore_best_weights=True  #val_recall_slouched, val_BA_no_upr
+            monitor="val_f1_sl", mode="max", patience=12, restore_best_weights=True
+        ),
+        tf.keras.callbacks.ModelCheckpoint(
+            "tcn_best_by_f1sl.weights.h5", save_weights_only=True, save_best_only=True,
+            monitor="val_f1_sl", mode="max"
         ),
         tf.keras.callbacks.ReduceLROnPlateau(
             monitor="val_loss", mode="min", factor=0.5, patience=6, min_lr=1e-5

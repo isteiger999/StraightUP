@@ -15,7 +15,7 @@ warnings.filterwarnings("ignore", category=NotOpenSSLWarning)
 def main():
 
     participants = ['Ivan', 'Dario', 'David', 'Claire', 'Mohid']         # 'Ivaan', 'Svetlana'
-    combinations, mean, std = find_combinations(participants, fraction = 0.3)  # fraction 0.1 means cut off  
+    combinations, mean, std = find_combinations(participants, fraction = 0.5)  # fraction 0.1 means cut off  
     n = len(combinations)
     print(combinations)
 
@@ -43,7 +43,7 @@ def main():
         print(f"CNN {index + 1}/{len(combinations)} trained")
 
         # 4. Confusion Matrix and mean/std
-        cm_avg.add(history, X_test, y_test, batch_size=256, verbose=0)
+        cm_avg.add(history, X_test, y_test, batch_size=128, verbose=0)
 
         for k, v in scores.items():
             mean[k] += v / n           # E[X]
@@ -54,7 +54,7 @@ def main():
     std_mean(mean, std)
 
     # print Confusion matrix (0 = upright, 1 = transition, 2 = slouch)
-    png_recall = cm_avg.save_figure(model_tag="cnn", normalize="true")  # recall view (for precision use normalize="pred")
+    png_recall = cm_avg.save_figure(model_tag="tcn", normalize="true")  # recall view (for precision use normalize="pred")
     print("✅ Saved averaged confusion matrix")
     
 

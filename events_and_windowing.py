@@ -386,8 +386,8 @@ def find_combinations(names: List[str], fraction: float = 1.0) -> Tuple[Dict[int
         random.shuffle(perms)
         combinations = {i: p for i, p in enumerate(perms)}
 
-    mean = {"loss": 0.0, "BA_no_upr": 0.0, "rec_sl": 0.0, "rec_trans": 0.0}
-    std = {"loss": 0.0, "BA_no_upr": 0.0, "rec_sl": 0.0, "rec_trans": 0.0}
+    mean = {"loss": 0.0, "BA_no_upr": 0.0, "rec_sl": 0.0, "rec_trans": 0.0, "f1_sl": 0.0}
+    std = {"loss": 0.0, "BA_no_upr": 0.0, "rec_sl": 0.0, "rec_trans": 0.0, "f1_sl": 0.0}
     return combinations, mean, std
 
 def fix_length(df_imu: pd.DataFrame, target_len: int = 18_000,

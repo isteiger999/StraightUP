@@ -242,8 +242,8 @@ def train_eval_tcn(X_train, y_train, X_val, y_val, verbose,
         optimizer=tf.keras.optimizers.legacy.Adam(5e-4),
         metrics=[
             BalancedAccuracySubset(include=(1,2), n_classes=n_classes, name="BA_no_upr"),
-            RecallForClass(class_id=2, n_classes=n_classes, name="rec_sl"),
-            RecallForClass(class_id=1, n_classes=n_classes, name="rec_trans"),
+            #RecallForClass(class_id=2, n_classes=n_classes, name="rec_sl"),
+            #RecallForClass(class_id=1, n_classes=n_classes, name="rec_trans"),
             F1ForClass(class_id=2, name="f1_sl"),  
         ],
     )

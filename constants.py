@@ -8,6 +8,7 @@ import tensorflow as tf
 import platform
 import pandas as pd
 import matplotlib.pyplot as plt
+#from events_and_windowing import X_and_y
 
 def configure_tensorflow_gpu(prefer_gpu: bool = True):
     """
@@ -84,12 +85,15 @@ def detect_fs(df):
     return 50.0
 # ---------------- FOR PLOTTING TO CHECK DELTAS ----------------
 def main():
+    #X_train, y_train = X_and_y("train", ['Ivan', 'Dario', 'David', 'Claire', 'Mohid'])
+
+
+    '''
     df = pd.read_csv(r"data/beep_schedules_Claire0/airpods_motion_d1760629578.csv")
     duration = 1600
     type = 'pitch_rad'
     signal = df[type]
     signal = signal[:duration]
-
     # pull the signal, clean NaNs for a clean plot
     s = pd.to_numeric(df[type], errors="coerce").interpolate(limit_direction="both")
     s = s.iloc[:duration].to_numpy(dtype=np.float32)
@@ -106,6 +110,7 @@ def main():
     plt.title("Visualization Delta Signal")
     plt.legend()
     plt.show()
+    '''
 
 if __name__ == '__main__':
     main()

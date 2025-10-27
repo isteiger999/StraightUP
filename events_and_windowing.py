@@ -1115,9 +1115,10 @@ def individual_accuracy(model, X_test, y_test, classes=(0, 1, 2)):
 
 
 # --- New Version of function: label_at_time to clean data ---
+
 def label_at_time(t, names, times, m):
     """
-    3-class labeling at timestamp t with margin m (seconds) treated as *human delay*.
+    3-class labeling at timestamp t with margin m (seconds) treated as human delay.
 
     Intervals (inclusive on the left, exclusive on the right):
         Upright (0):            UPRIGHT_HOLD_START + m → SLOUCH_START + m
@@ -1125,23 +1126,17 @@ def label_at_time(t, names, times, m):
                                 RECOVERY_START + m → next UPRIGHT_HOLD_START + 2*m
         Slouched (2):           SLOUCHED_HOLD_START → RECOVERY_START + m
 
-    Non-slouch markers ('NOSLOUCH_START', 'NOSLOUCHED_HOLD_START') are always upright (0).
-    Before the first event: upright (0). No anticipation around SLOUCH_START.
+    Non-slouch markers ('NOSLOUCH_START', 'NOSLOUCHED_HOLD_START') are always upright (0),
+    except that we still mark transitions before/after the non-slouch hold:
+        NOSLOUCH_START → NOSLOUCHED_HOLD_START  ==  transition (1)
+        RECOVERY_START  → UPRIGHT_HOLD_START    ==  transition (1)
 
     Parameters
     ----------
     t : float
-        Timestamp (seconds).
-    names : sequence of str
-        Event names, same length as `times`, sorted by time.
-    times : sequence of float
-        Event times (seconds), non-decreasing, same length as `names`.
-    m : float
-        Delay margin in seconds (>= 0).
-
-    Returns
-    -------
-    int in {0,1,2}
+    names : sequence of str (sorted by time)
+    times : sequence of float (same length as names; non-decreasing)
+    m : float  (>=0)
     """
     if len(names) != len(times):
         raise ValueError("`names` and `times` must have the same length.")
@@ -1162,45 +1157,53 @@ def label_at_time(t, names, times, m):
     next_t  = times[k + 1] if (k + 1) < len(times) else np.inf
     prev_prev_ev = names[k - 1] if (k - 1) >= 0 else None
 
+    # ---------- Non-slouch onset/hold ----------
     if prev_ev == 'NOSLOUCH_START':
-    # Before the delay 'm' → upright
+        # Before delay m -> upright
         if t < prev_t + m:
             return 0
-        # After the delay, call it transition *only* if we are indeed in the no-slouch cycle
+        # After delay until NOSLOUCHED_HOLD_START -> transition
         if next_ev == 'NOSLOUCHED_HOLD_START':
             return 1
         return 0
 
     if prev_ev == 'NOSLOUCHED_HOLD_START':
-        # For m seconds after NOSLOUCHED_HOLD_START, still transition (closing the interval)
+        # For m seconds after NOSLOUCHED_HOLD_START, still transition (closing the onset band)
         if prev_prev_ev == 'NOSLOUCH_START' and t < prev_t + m:
             return 1
-        return 0
+        return 0  # the non-slouch hold itself is upright
 
-    # Upright hold (HERE)
+    # ---------- Upright hold ----------
     if prev_ev == 'UPRIGHT_HOLD_START':
+        # After a recovery (either slouch or non-slouch), keep m (slouch) or up to 2m as transition close-out
         if prev_prev_ev == 'RECOVERY_START' and t < prev_t + 2*m:
             return 1
         return 0
 
-    # Start slouching: human delay keeps it upright for m seconds
+    # ---------- Slouch onset ----------
     if prev_ev == 'SLOUCH_START':
         if t < prev_t + m:
-            return 0         # still upright during delay
-        return 1              # transition until SLOUCHED_HOLD_START (handled when prev_ev changes)
+            return 0  # still upright during delay
+        return 1      # transition until SLOUCHED_HOLD_START
 
-    # Slouched hold: stays slouched until RECOVERY_START + m
+    # ---------- Slouch hold ----------
     if prev_ev == 'SLOUCHED_HOLD_START':
         return 2
 
-    # Recovery: remains slouched for m, then transition until next upright hold
+    # ---------- Recovery ----------
     if prev_ev == 'RECOVERY_START':
-        # Guard: only treat as a recovery from a true slouch hold
-        if prev_prev_ev != 'SLOUCHED_HOLD_START':
-            return 0
-        if t < prev_t + m:
-            return 2          # still effectively slouched during delay
-        return 1              # transition out until next UPRIGHT_HOLD_START
+        # Case A: recovering from a true slouch hold
+        if prev_prev_ev == 'SLOUCHED_HOLD_START':
+            if t < prev_t + m:
+                return 2      # still slouched during delay
+            return 1          # transition until next UPRIGHT_HOLD_START
+
+        # Case B: recovering from a non-slouch hold -> we still want a transition band
+        if prev_prev_ev == 'NOSLOUCHED_HOLD_START':
+            return 1          # entire interval until UPRIGHT_HOLD_START is transition
+
+        # Anything else: default upright
+        return 0
 
     # Fallback: upright
     return 0
@@ -1466,6 +1469,7 @@ def find_shapes():
 
     return t, dt_med, fs, win_len_frames, stride_frames, N, windows_per_rec, stride, len_window_sec
 
+# -----------------------------
 
 def X_and_y(type, list_comb):
     matching_folders, n_folders = folders_tot(type, list_comb)
@@ -1478,7 +1482,9 @@ def X_and_y(type, list_comb):
         if not os.path.isdir(folder_path):
             continue
 
+        # use the new inferred files (single canonical one per session)
         event_files = glob.glob(os.path.join(folder_path, 'events_inferred_*.csv'))
+        # allow both d* and non-d* IMU filenames
         imu_files   = glob.glob(os.path.join(folder_path, 'airpods_motion_d*.csv'))
         if not event_files or not imu_files:
             print(f"⚠️ Missing files in {folder_path}")
@@ -1487,45 +1493,29 @@ def X_and_y(type, list_comb):
         df_event = pd.read_csv(event_files[0])
         df_imu   = pd.read_csv(imu_files[0])
 
-        # --- Align event times to IMU time axis ---
+        # --- IMU time axis (optional: sanitize to non-decreasing) ---
         t_imu = df_imu.iloc[:, 0].astype(float).to_numpy()
+        if np.any(np.diff(t_imu) < 0):
+            t_imu = np.maximum.accumulate(t_imu)
         t0 = float(t_imu[0])
 
+        # --- Events are ALREADY on the IMU time axis -> no re-alignment ---
         ev = df_event[['t_sec','event']].copy()
-        ev = ev.sort_values('t_sec').reset_index(drop=True)
+        ev = ev.sort_values('t_sec', kind='mergesort').reset_index(drop=True)
 
-        # shift events so their first timestamp maps to IMU t0
-        ev['t_aligned'] = ev['t_sec'].astype(float) - float(ev['t_sec'].iloc[0]) + t0
-
-        # ensure initial upright AT t0, then keep list sorted by aligned time
+        # ensure initial upright at t0 (harmless if already present)
         if ev.iloc[0]['event'] != 'UPRIGHT_HOLD_START':
             ev = pd.concat([
-                pd.DataFrame({'t_sec':[ev['t_sec'].iloc[0]], 'event':['UPRIGHT_HOLD_START'], 't_aligned':[t0]}),
+                pd.DataFrame({'t_sec':[t0], 'event':['UPRIGHT_HOLD_START']}),
                 ev
             ], ignore_index=True)
+            ev = ev.sort_values('t_sec', kind='mergesort').reset_index(drop=True)
 
-        ev = ev.sort_values('t_aligned', kind='mergesort').reset_index(drop=True)
-
-        times = ev['t_aligned'].to_numpy()
+        times = ev['t_sec'].astype(float).to_numpy()
         names = ev['event'].astype(str).tolist()
         
         # --- Labels: state at window END on IMU axis ---
-        '''
-        WORK ON THIS LATER TO LABEL 'TRANSITION' RIGHT
-        m = 0.2
-        labels_array = np.zeros((windows_per_rec, 1), dtype=int)
-        for i in range(windows_per_rec):
-            t_end   = t0 + len_window_sec + i * stride
-            t_start = t_end - len_window_sec
-            labels_array[i, 0] = label_window_interval_centered(
-                t_start, t_end, names, times, m,
-                n_samples=win_len_frames,      # 75 for your setup
-                center_band=(0.4, 0.6),      # only count transitions near the middle
-                min_total_trans_frac=0.12,     # ~9/75 frames
-                min_center_trans_frac=0.08     # ~6/75 frames
-            )
-        '''
-        m = 0.3
+        m = 0.0  # manual offsets already encode margins
         labels_array = np.zeros((windows_per_rec, 1), dtype=int)
         for i in range(windows_per_rec):
             current_time = t0 + len_window_sec + i * stride
@@ -1536,9 +1526,7 @@ def X_and_y(type, list_comb):
         # --- Features: drop the time column by position (your current approach) ---
         Xsig = df_imu.iloc[:, 1:].to_numpy(dtype=np.float32, copy=False)
         n_ch = Xsig.shape[1]
-        N = Xsig.shape[0]
 
-        # lazy allocation once we know n_ch
         if X_tot is None:
             X_tot = np.zeros((n_folders * windows_per_rec, win_len_frames, n_ch), dtype=np.float32)
 
@@ -1550,26 +1538,23 @@ def X_and_y(type, list_comb):
             end = start + win_len_frames
             win = Xsig[start:end, :]
 
-            # If start is beyond the signal (empty slice), repeat the last sample
+            # pad if needed
             if win.shape[0] == 0:
                 last = Xsig[-1:, :]
                 win = np.repeat(last, win_len_frames, axis=0)
             elif win.shape[0] < win_len_frames:
                 need = win_len_frames - win.shape[0]
-                pad_tail = np.repeat(win[-1:, :], need, axis=0)
-                win = np.concatenate([win, pad_tail], axis=0)
+                win = np.concatenate([win, np.repeat(win[-1:, :], need, axis=0)], axis=0)
 
+            # optional left-mirror augmentation
             r = random.randint(0, max_crop) if max_crop > 0 else 0
             if r > 0:
                 left = win[:r, :]
-                left_mirror = np.flip(left, axis=0)
-                win = np.concatenate([left_mirror, win[r:, :]], axis=0)
+                win = np.concatenate([np.flip(left, axis=0), win[r:, :]], axis=0)
 
             X_tot[base + i, :, :] = win
 
     return X_tot, y_tot
-
-
 
 
 

@@ -265,18 +265,25 @@ def plot_reconstructed_signal(
         return x, recon
     return None
 
+def plot_label_verlauf(y_train, length):
+    plt.plot(np.arange(y_train[:length].shape[0]), y_train[:length])
+    plt.xlabel("windows")
+    plt.ylabel("Label")
+    plt.show()
+
 def main():
-    X_train, y_train = X_and_y("train", ['Claire', 'Mohid', 'Dario', 'David', 'Ivan']) #['Ivan', 'Dario', 'David', 'Claire', 'Mohid']
+    X_train, y_train = X_and_y("train", ['Mohid', 'Claire', 'Dario', 'David', 'Ivan']) #['Ivan', 'Dario', 'David', 'Claire', 'Mohid']
+    #plot_label_verlauf(y_train, length=700)
     plot_reconstructed_signal(
         X_train, y_train,
         windows=75,
         chanel=[11, 12],
         num_windows=240,    #100
-        start_window=480,     #0, 240, 480
+        start_window=0,     #0, 240, 480
         show=True
     )
 
-
+    ##
     '''
     df = pd.read_csv(r"data/beep_schedules_Claire0/airpods_motion_d1760629578.csv")
     duration = 1600

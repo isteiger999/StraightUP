@@ -460,7 +460,7 @@ def plot_reconstructed_signal_slider(
     return fig, ax, s_start
 
 def main():
-    '''
+    
     X_train, y_train = X_and_y("train", ['David', 'Ivan', 'Mohid', 'Claire', 'Dario']) #['Ivan', 'Dario', 'David', 'Claire', 'Mohid']
     #plot_label_verlauf(y_train, length=700)
     plot_reconstructed_signal_slider(
@@ -473,10 +473,10 @@ def main():
         fs=50.0,                                   # sampling rate of your frames
         pre_beep=0.05, post_beep=0.90              # tweak if you like
     )
-    '''
+    
     ##
     # Delete delta files:
-    delete_airpods_motion_d_csvs("data", dry_run=False)  # actually delete
+    # delete_airpods_motion_d_csvs("data", dry_run=False)  # actually delete
     '''
     df = pd.read_csv(r"data/beep_schedules_Claire0/airpods_motion_d1760629578.csv")
     duration = 1600

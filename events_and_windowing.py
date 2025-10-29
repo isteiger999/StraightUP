@@ -1008,6 +1008,51 @@ def calculate_deltas(
 
     return df_delta, global_numeric_baseline, windows
 
+def compute_and_save_delta_once(
+    df_imu: pd.DataFrame,
+    *,
+    csv_path: str,
+    baseline_method: str = "mean",
+    min_window_seconds: float = 1.0,
+    verbose: bool = False,
+) -> Tuple[str, bool]:
+    """
+    Compute delta for the given IMU dataframe and save to the canonical
+    delta path *only if it does not already exist*.
+
+    Returns: (out_csv_path, created_bool)
+      - created_bool=False means an existing delta file was left untouched.
+    """
+    out_csv = make_delta_csv_path(csv_path)  # e.g., airpods_motion_d*.csv
+
+    # Fast path: if it exists, don't touch it.
+    if os.path.exists(out_csv):
+        if verbose:
+            print(f"⏭️  Delta exists; leaving as-is: {out_csv}")
+        return out_csv, False
+
+    # Compute deltas
+    df_delta, _, _ = calculate_deltas(
+        df_imu,
+        csv_path=csv_path,
+        baseline_method=baseline_method,
+        min_window_seconds=min_window_seconds,
+        verbose=verbose,
+    )
+
+    # Exclusive create to be race-safe. If another process created it meanwhile,
+    # this will raise FileExistsError and we will leave it alone.
+    try:
+        with open(out_csv, "x", newline="") as fh:
+            df_delta.to_csv(fh, index=False)
+        if verbose:
+            print(f"✅ Wrote delta: {out_csv}")
+        return out_csv, True
+    except FileExistsError:
+        if verbose:
+            print(f"⏭️  Delta appeared concurrently; skipping: {out_csv}")
+        return out_csv, False
+
 ############################
 
 def edit_csv():
@@ -1053,17 +1098,13 @@ def edit_csv():
             ### NEW FILE WITH DELTA CALCULATION ###
 
             try:
-                out_csv = make_delta_csv_path(csv_path)   # always "..._d<rest>.csv"
-                df_delta, _, _ = calculate_deltas(
+                compute_and_save_delta_once(
                     df_imu,
                     csv_path=csv_path,
-                    # keep quats as id_cols if desired:
-                    # id_cols=[_detect_timestamp_col(df_imu), "quat_x", "quat_y", "quat_z", "quat_w"],
                     baseline_method="mean",
                     min_window_seconds=1.0,
-                    verbose=False
+                    verbose=False,
                 )
-                df_delta.to_csv(out_csv, index=False)  # creates if missing, overwrites if exists
             except Exception as e:
                 print(f"⚠️ Delta conversion skipped for: {csv_path}\n   ↳ {e}")
 

@@ -20,6 +20,7 @@ import os
 import glob
 import re
 
+# ---- Delete delta files ----
 def delete_airpods_motion_d_csvs(root: str = "data", dry_run: bool = True):
     """
     Delete ONLY files matching:
@@ -63,7 +64,7 @@ def delete_airpods_motion_d_csvs(root: str = "data", dry_run: bool = True):
     for p in deleted:
         print(" -", p)
     return deleted
-
+# -------------------
 
 # ---------------- Filtering ----------------
 def ema_alpha(fc, fs):
@@ -459,23 +460,23 @@ def plot_reconstructed_signal_slider(
     return fig, ax, s_start
 
 def main():
-    
-    X_train, y_train = X_and_y("train", ['Mohid', 'Claire', 'Dario', 'David', 'Ivan']) #['Ivan', 'Dario', 'David', 'Claire', 'Mohid']
+    '''
+    X_train, y_train = X_and_y("train", ['David', 'Ivan', 'Mohid', 'Claire', 'Dario']) #['Ivan', 'Dario', 'David', 'Claire', 'Mohid']
     #plot_label_verlauf(y_train, length=700)
     plot_reconstructed_signal_slider(
         X_train, y_train,
         windows=75,
         chanel=[7, 11, 12], #4
-        view_windows=40,
+        view_windows=100,
         start_window=0,
         beep_schedule="data/beep_schedules_Claire0/beep_schedule_Claire0.csv",  # << path or DataFrame
         fs=50.0,                                   # sampling rate of your frames
         pre_beep=0.05, post_beep=0.90              # tweak if you like
     )
-    
+    '''
     ##
     # Delete delta files:
-    # delete_airpods_motion_d_csvs("data", dry_run=False)  # actually delete
+    delete_airpods_motion_d_csvs("data", dry_run=False)  # actually delete
     '''
     df = pd.read_csv(r"data/beep_schedules_Claire0/airpods_motion_d1760629578.csv")
     duration = 1600

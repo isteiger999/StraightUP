@@ -204,7 +204,7 @@ def blocks_for_full_rf(seq_len, k, max_blocks=12):
 
 # ---------- Train/Eval wrapper ----------
 def train_eval_tcn(X_train, y_train, X_val, y_val, verbose,
-                   *, kernel_size=7, base_filters=64, dropout=0.10, l2=8e-4,
+                   *, kernel_size=5, base_filters=32, dropout=0.25, l2=2e-3,
                    max_epochs=1000, n_classes=3):
     tf.keras.utils.set_random_seed(42)
 
@@ -230,13 +230,13 @@ def train_eval_tcn(X_train, y_train, X_val, y_val, verbose,
         d *= 2
 
     x = layers.GlobalAveragePooling1D()(x)
-    x = layers.Dropout(0.30)(x)
+    x = layers.Dropout(0.40)(x)
     x = layers.Dense(64, activation="relu", kernel_regularizer=regularizers.l2(l2))(x)
-    x = layers.Dropout(0.20)(x)
+    x = layers.Dropout(0.30)(x)
     y = layers.Dense(n_classes, activation="softmax")(x)
 
     model = models.Model(x_in, y)
-    loss = WeightedSparseCCE(class_weights=[0.8, 1.0, 1.15], from_logits=False)
+    loss = WeightedSparseCCE(class_weights=[0.8, 1.0, 1.2], from_logits=False)
     model.compile(
         loss=loss,
         optimizer=tf.keras.optimizers.legacy.Adam(5e-4),
@@ -269,7 +269,7 @@ def train_eval_tcn(X_train, y_train, X_val, y_val, verbose,
         X_train_shuffled, y_train_shuffled,
         validation_data=(X_val, y_val),
         epochs=max_epochs,
-        batch_size=128,
+        batch_size=64,
         shuffle=False,
         callbacks=callbacks,
         verbose=verbose,

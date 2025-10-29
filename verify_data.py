@@ -14,6 +14,56 @@ import matplotlib.pyplot as plt
 from events_and_windowing import X_and_y
 from matplotlib.patches import Patch
 from typing import Optional, Sequence, Tuple, Union
+from matplotlib.widgets import Slider
+from matplotlib.patches import Patch
+import os
+import glob
+import re
+
+def delete_airpods_motion_d_csvs(root: str = "data", dry_run: bool = True):
+    """
+    Delete ONLY files matching:
+        data/beep_schedules_*/airpods_motion_d<digits>.csv
+
+    Safety:
+      - Uses a strict regex (airpods_motion_d\\d+\\.csv).
+      - Set dry_run=False to actually delete.
+
+    Returns a list of file paths (matched; deleted if dry_run=False).
+    """
+    pattern = os.path.join(root, "beep_schedules_*", "airpods_motion_d*.csv")
+    files = sorted(glob.glob(pattern))
+    rx = re.compile(r"^airpods_motion_d\d+\.csv\Z")
+
+    matched = []
+    for p in files:
+        name = os.path.basename(p)
+        if rx.fullmatch(name) and os.path.isfile(p):
+            matched.append(p)
+
+    if not matched:
+        print("No matching files found.")
+        return []
+
+    if dry_run:
+        print(f"[DRY RUN] Would delete {len(matched)} file(s):")
+        for p in matched:
+            print(" -", p)
+        return matched
+
+    deleted = []
+    for p in matched:
+        try:
+            os.remove(p)
+            deleted.append(p)
+        except Exception as e:
+            print(f"Failed to delete {p}: {e}")
+
+    print(f"Deleted {len(deleted)} file(s).")
+    for p in deleted:
+        print(" -", p)
+    return deleted
+
 
 # ---------------- Filtering ----------------
 def ema_alpha(fc, fs):
@@ -45,130 +95,134 @@ def detect_fs(df):
     return 50.0
 
 # ---------------- FOR PLOTTING TO CHECK DELTAS ----------------
-def plot_reconstructed_signal(
+
+def plot_label_verlauf(y_train, length):
+    plt.plot(np.arange(y_train[:length].shape[0]), y_train[:length])
+    plt.xlabel("windows")
+    plt.ylabel("Label")
+    plt.show()
+
+def plot_reconstructed_signal_slider(
     X_train,
     y_train,
     windows: int,
-    chanel: Union[int, Sequence[int]],   # <-- now supports list/tuple/ndarray of ints
+    chanel,
     *,
     stride: Optional[int] = None,
-    num_windows: Optional[int] = None,
-    start_window: int = 0,
+    view_windows: int = 100,        # how many windows to show at once
+    start_window: int = 0,          # initial position
     label_names: Optional[Sequence[str]] = ("upright", "transition", "slouch"),
     show_bands: bool = True,
     show_vlines: bool = True,
     title: Optional[str] = None,
     figsize: Tuple[int, int] = (12, 4),
-    return_signal: bool = False,
-    show: bool = True,
-    savepath: Optional[str] = None,
+
+    # --- NEW OPTIONAL ARGS (default values preserve old behavior) ---
+    beep_schedule: Optional[
+        Union[str, pd.DataFrame, Sequence[Tuple[float, str, str]]]
+    ] = None,                       # CSV path | DataFrame | iterable of (t_sec, event, value)
+    fs: float = 50.0,               # sampling rate [Hz] to convert seconds -> frames
+    pre_beep: float = 0.05,         # seconds to draw to the LEFT of beep
+    post_beep: float = 0.90,        # seconds to draw to the RIGHT of beep
 ):
     """
-    Reconstruct a continuous signal from overlapped windows and visualize
-    which window corresponds to which label. Can overlay multiple channels.
+    Interactive viewer: same visualization as plot_reconstructed_signal,
+    but with a horizontal slider to move the start window. Always shows
+    exactly `view_windows` windows at a time.
 
-    Parameters
-    ----------
-    X_train : array-like
-        Shapes supported:
-        - (n_windows, window_len, n_channels)
-        - (n_windows, n_channels, window_len)
-        - (n_windows, window_len)  # single-channel only
-    y_train : array-like of int, length n_windows
-        Label per window (0: upright, 1: transition, 2: slouch).
-    windows : int
-        Window length in frames (e.g., 75).
-    chanel : int or sequence of int
-        Channel index(es) to plot. If multiple, all are overlaid in the same axes.
-        For 2-D X (single-channel), this must be a single index (0).
-    stride : int, optional
-        Frame step between consecutive window starts. Defaults to windows//3.
-    num_windows : int, optional
-        Number of consecutive windows to plot from `start_window`. If None, plots all.
-    start_window : int
-        Starting window index.
-    label_names : sequence of str
-        Names for labels [0,1,2].
-    show_bands : bool
-        Draw translucent bands for each window span colored by its label.
-    show_vlines : bool
-        Draw a vertical line at each window start colored by its label.
-    title : str, optional
-    figsize : (int, int)
-    return_signal : bool
-        If True, returns (x, recon) where:
-            - recon has shape (total_len,) for a single channel,
-            - recon has shape (total_len, n_selected_channels) for multiple channels.
-    show : bool
-        Call plt.show() if True.
-    savepath : str, optional
-        If provided, saves the figure to this path.
+    Adds thick separators after every 718 windows to mark participant changes.
+    Also (optional) overlays short horizontal line segments centered on
+    each BEEP_SLOUCH and BEEP_RECOVER event (from `beep_schedule`) and
+    a dot at the beep time.
 
-    Returns
-    -------
-    (x, recon) if return_signal else None
+    Parameters (new)
+    ---------------
+    beep_schedule : str | pandas.DataFrame | iterable[(t_sec, event, value)] | None
+        If provided, all 'BEEP_SLOUCH' and 'BEEP_RECOVER' times are extracted
+        and shown. Interpreted as seconds from the start of a recording.
+        The pattern is repeated every 718 windows so it lines up with each recording.
+    fs : float
+        Sampling rate [Hz] to convert seconds -> frame indices. Defaults to 50.0.
+    pre_beep, post_beep : float
+        Seconds to extend the marker segment left/right of the beep time.
     """
-    # --- normalize channel argument to a clean, unique list of ints ---
+    # ---- config for participant separators ----
+    SEP_EVERY = 718              # black separators every 718 windows
+    SEP_COLOR = "black"
+    SEP_LW = 3.0
+    SEP_ALPHA = 0.9
+
+    # ---- additional thicker blue separators every 2872 windows ----
+    SUPER_SEP_EVERY = 2872
+    SUPER_SEP_COLOR = "#1f77b4"  # matplotlib's default blue
+    SUPER_SEP_LW = 4.5           # a bit thicker than the 718-line
+    SUPER_SEP_ALPHA = 0.95
+
+    # ---- style for BEEP_SLOUCH markers ----
+    BEEP_SEG_LW = 2.6
+    BEEP_SEG_ALPHA = 0.95
+    BEEP_SEG_COLOR = "#9467bd"   # purple (distinct from class bands)
+    BEEP_DOT_MS = 6.5
+    BEEP_DOT_FC = "white"
+    BEEP_DOT_EC = "black"
+
+    # ---- style for BEEP_RECOVER markers ----
+    REC_SEG_LW = 2.6
+    REC_SEG_ALPHA = 0.95
+    REC_SEG_COLOR = "#17becf"    # cyan (distinct from bands & slouch)
+    REC_DOT_MS = 6.5
+    REC_DOT_FC = "white"
+    REC_DOT_EC = "black"
+
+    # --- normalize channel argument (keep your original 'chanel' spelling) ---
     if isinstance(chanel, (int, np.integer)):
         channels = [int(chanel)]
     else:
-        try:
-            channels = [int(c) for c in chanel]
-        except Exception as e:
-            raise TypeError("`chanel` must be an int or a sequence of ints.") from e
-        # de-duplicate while preserving order
+        channels = [int(c) for c in chanel]
         seen = set(); _uniq = []
         for c in channels:
             if c not in seen:
                 _uniq.append(c); seen.add(c)
         channels = _uniq
 
+    # --- basic arrays ---
     X = np.asarray(X_train)
     y = np.asarray(y_train).reshape(-1).astype(int)
 
     if X.ndim not in (2, 3):
         raise ValueError(f"X_train must be 2D or 3D, got {X.ndim}D.")
 
-    # --- Extract requested channels -> data3 with shape (n_windows_total, window_len, n_sel_channels) ---
+    # --- extract to (nW, win, n_sel) exactly (same logic as your function) ---
     if X.ndim == 2:
-        # Single-channel case: (n_windows_total, window_len)
         if len(channels) != 1 or channels[0] != 0:
             raise ValueError("For 2D X_train (single-channel), use chanel=[0] or chanel=0.")
-        data3 = X[:, :, None]  # add a 'channel' axis of size 1
+        data3 = X[:, :, None]
         if data3.shape[1] != windows:
             windows = int(data3.shape[1])
     else:
-        # 3D input
         if X.shape[1] == windows:
-            # (n_windows_total, window_len, n_channels)
             n_channels_total = X.shape[2]
             if not all(0 <= c < n_channels_total for c in channels):
                 raise IndexError(f"Some indices in {channels} are out of range [0, {n_channels_total-1}].")
-            data3 = X[:, :, channels]  # -> (nW, win, n_sel)
+            data3 = X[:, :, channels]
         elif X.shape[2] == windows:
-            # (n_windows_total, n_channels, window_len)
             n_channels_total = X.shape[1]
             if not all(0 <= c < n_channels_total for c in channels):
                 raise IndexError(f"Some indices in {channels} are out of range [0, {n_channels_total-1}].")
-            data3 = X[:, channels, :]              # (nW, n_sel, win)
-            data3 = np.transpose(data3, (0, 2, 1)) # -> (nW, win, n_sel)
+            data3 = np.transpose(X[:, channels, :], (0, 2, 1))
         else:
-            # Infer which axis is window_len
             if X.shape[1] >= X.shape[2]:
-                # Assume (nW, win, nCh)
                 n_channels_total = X.shape[2]
                 if not all(0 <= c < n_channels_total for c in channels):
                     raise IndexError(f"Some indices in {channels} are out of range [0, {n_channels_total-1}].")
                 data3 = X[:, :, channels]
                 windows = int(X.shape[1])
             else:
-                # Assume (nW, nCh, win)
                 n_channels_total = X.shape[1]
                 if not all(0 <= c < n_channels_total for c in channels):
                     raise IndexError(f"Some indices in {channels} are out of range [0, {n_channels_total-1}].")
-                data3 = X[:, channels, :]
+                data3 = np.transpose(X[:, channels, :], (0, 2, 1))
                 windows = int(X.shape[2])
-                data3 = np.transpose(data3, (0, 2, 1))
 
     n_windows_total, win_len, n_sel = data3.shape
     if win_len != windows:
@@ -177,113 +231,251 @@ def plot_reconstructed_signal(
     if y.shape[0] != n_windows_total:
         raise ValueError(f"y_train length ({y.shape[0]}) != number of windows ({n_windows_total}).")
 
-    if not (0 <= start_window < n_windows_total):
-        raise ValueError(f"start_window must be within [0, {n_windows_total-1}], got {start_window}.")
-
-    n_plot = (n_windows_total - start_window) if (num_windows is None) else num_windows
-    if n_plot <= 0 or start_window + n_plot > n_windows_total:
-        raise ValueError("Invalid num_windows/start_window slice.")
-
-    data_plot3 = data3[start_window : start_window + n_plot, :, :]  # (n_plot, win, n_sel)
-    y_plot = y[start_window : start_window + n_plot]
-
     if stride is None:
         stride = max(1, windows // 3)
     if stride <= 0:
         raise ValueError("stride must be a positive integer.")
 
-    # --- Overlap-add reconstruction for all selected channels at once ---
-    total_len = (n_plot - 1) * stride + windows
-    recon = np.zeros((total_len, n_sel), dtype=float)
-    weights = np.zeros(total_len, dtype=float)
+    view_windows = int(view_windows)
+    if not (1 <= view_windows <= n_windows_total):
+        view_windows = min(100, n_windows_total)
 
-    for k in range(n_plot):
-        s, e = k * stride, k * stride + windows
-        recon[s:e, :] += data_plot3[k, :, :]   # add all channels for this window
-        weights[s:e] += 1.0
+    max_start = n_windows_total - view_windows
+    start_window = int(np.clip(int(start_window), 0, max_start))
 
-    weights[weights == 0] = 1.0
-    recon = recon / weights[:, None]          # average overlaps, channel-wise
+    # global y-limits so the vertical scale doesn't jump when sliding
+    global_min = float(np.nanmin(data3))
+    global_max = float(np.nanmax(data3))
+    pad = 0.05 * max(1e-9, global_max - global_min)
+    y_min, y_max = global_min - pad, global_max + pad
 
-    # --- Visualization ---
-    x = np.arange(total_len)
+    palette = {0: "#2ca02c", 1: "#ff7f0e", 2: "#d62728"}  # upright/transition/slouch
+
+    # --- precompute event base times (seconds) from schedule, if any ---
+    def _extract_slouch_times_sec(schedule) -> np.ndarray:
+        if schedule is None:
+            return np.empty(0, dtype=float)
+        if isinstance(schedule, str):
+            df = pd.read_csv(schedule)
+        elif isinstance(schedule, pd.DataFrame):
+            df = schedule
+        else:
+            # assume iterable of (t_sec, event, value)
+            df = pd.DataFrame(list(schedule), columns=["t_sec", "event", "value"])
+        if "t_sec" not in df.columns or "event" not in df.columns:
+            return np.empty(0, dtype=float)
+        df = df.copy()
+        df["t_sec"] = pd.to_numeric(df["t_sec"], errors="coerce")
+        sl = df[df["event"].astype(str).str.upper() == "BEEP_SLOUCH"]["t_sec"].dropna()
+        return np.sort(sl.to_numpy(dtype=float))
+
+    def _extract_recover_times_sec(schedule) -> np.ndarray:
+        if schedule is None:
+            return np.empty(0, dtype=float)
+        if isinstance(schedule, str):
+            df = pd.read_csv(schedule)
+        elif isinstance(schedule, pd.DataFrame):
+            df = schedule
+        else:
+            df = pd.DataFrame(list(schedule), columns=["t_sec", "event", "value"])
+        if "t_sec" not in df.columns or "event" not in df.columns:
+            return np.empty(0, dtype=float)
+        df = df.copy()
+        df["t_sec"] = pd.to_numeric(df["t_sec"], errors="coerce")
+        rc = df[df["event"].astype(str).str.upper() == "BEEP_RECOVER"]["t_sec"].dropna()
+        return np.sort(rc.to_numpy(dtype=float))
+
+    slouch_times_base = _extract_slouch_times_sec(beep_schedule)   # seconds within ONE recording
+    recover_times_base = _extract_recover_times_sec(beep_schedule) # seconds within ONE recording
+
+    # Each recording spans 718 windows; convert that span to seconds via fs/stride/windows
+    frames_per_recording = (SEP_EVERY - 1) * stride + windows
+    seconds_per_recording = frames_per_recording / float(fs)
+
+    # --- plotting & slider ---
     fig, ax = plt.subplots(figsize=figsize)
+    plt.subplots_adjust(bottom=0.22)  # room for the slider
 
-    # plot each selected channel
-    channel_lines = []
-    for j in range(n_sel):
-        (line,) = ax.plot(x, recon[:, j], linewidth=1.2, label=f"ch {channels[j]}")
-        channel_lines.append(line)
+    def draw_slice(start_idx: int):
+        ax.clear()
+        k0, k1 = start_idx, start_idx + view_windows
+        data_plot3 = data3[k0:k1, :, :]
+        y_plot = y[k0:k1]
+        n_plot = data_plot3.shape[0]
 
-    # window label decorations
-    palette = {0: "#2ca02c", 1: "#ff7f0e", 2: "#d62728"}  # upright / transition / slouch
-    if show_bands or show_vlines:
-        for k, lab in enumerate(y_plot):
+        total_len = (n_plot - 1) * stride + windows
+        recon = np.zeros((total_len, n_sel), dtype=float)
+        weights = np.zeros(total_len, dtype=float)
+        for k in range(n_plot):
             s, e = k * stride, k * stride + windows
-            c = palette.get(int(lab), "0.5")
-            if show_bands:
-                ax.axvspan(s, e, color=c, alpha=0.12, lw=0)
-            if show_vlines:
-                ax.axvline(s, color=c, alpha=0.8, lw=0.8)
+            recon[s:e, :] += data_plot3[k, :, :]
+            weights[s:e] += 1.0
+        weights[weights == 0] = 1.0
+        recon = recon / weights[:, None]
+        x = np.arange(total_len)
 
-    ax.set_xlim(0, total_len - 1)
-    ax.set_xlabel("Frame")
-    ax.set_ylabel("Signal value")
-    if title is None:
-        end_idx = start_window + n_plot - 1
-        title = (f"Reconstructed signal — channels {channels}, window={windows}, stride={stride} | "
-                 f"windows {start_window}–{end_idx}")
-    ax.set_title(title)
-    ax.grid(True, alpha=0.3)
+        # channels
+        channel_lines = []
+        for j in range(n_sel):
+            (line,) = ax.plot(x, recon[:, j], linewidth=1.2, label=f"ch {channels[j]}")
+            channel_lines.append(line)
 
-    # Legends: channels (left) + window labels (right)
-    legend_channels = ax.legend(handles=channel_lines, loc="upper left", title="Channels")
-    unique_labels = sorted(set(int(v) for v in y_plot))
-    handles_labels = [Patch(facecolor=palette.get(k, "0.7"),
-                            edgecolor=palette.get(k, "0.7"),
-                            alpha=0.25,
-                            label=f"{k} – {(label_names[k] if label_names and 0<=k<len(label_names) else str(k))}")
-                     for k in unique_labels]
-    if handles_labels:
-        legend_labels = ax.legend(handles=handles_labels, loc="upper right", title="Window labels")
-        ax.add_artist(legend_channels)  # keep both legends
+        # label decorations
+        if show_bands or show_vlines:
+            for k, lab in enumerate(y_plot):
+                s, e = k * stride, k * stride + windows
+                c = palette.get(int(lab), "0.5")
+                if show_bands:
+                    ax.axvspan(s, e, color=c, alpha=0.12, lw=0)
+                if show_vlines:
+                    ax.axvline(s, color=c, alpha=0.8, lw=0.8)
 
-    plt.tight_layout()
+        # --- BEEP_SLOUCH markers (optional) ---
+        if slouch_times_base.size:
+            # Absolute time of view [t0_sec, t1_sec]
+            t0_sec = (k0 * stride) / float(fs)
+            t1_sec = t0_sec + (total_len / float(fs))
 
-    if savepath is not None:
-        fig.savefig(savepath, dpi=150, bbox_inches="tight")
+            if seconds_per_recording > 0:
+                m_min = int(np.floor((t0_sec - slouch_times_base[-1]) / seconds_per_recording)) - 1
+                m_max = int(np.ceil(t1_sec / seconds_per_recording)) + 1
+            else:
+                m_min, m_max = 0, 0
 
-    if show:
-        plt.show()
-    else:
-        plt.close(fig)
+            # y-level near the top for visibility
+            y_span = (y_max - y_min)
+            y_seg = y_max - 0.04 * y_span
 
-    # Return 1D for single-channel to preserve backward compatibility
-    if return_signal:
-        if n_sel == 1:
-            return x, recon[:, 0]
-        return x, recon
-    return None
+            for m in range(m_min, m_max + 1):
+                base_shift = m * seconds_per_recording
+                if base_shift + slouch_times_base[0] > t1_sec + post_beep:
+                    break
+                for t_sl in slouch_times_base:
+                    t_abs = base_shift + t_sl
+                    if (t_abs + post_beep) < t0_sec or (t_abs - pre_beep) > t1_sec:
+                        continue
+                    x0 = (t_abs - pre_beep - t0_sec) * fs
+                    x1 = (t_abs + post_beep - t0_sec) * fs
+                    xb = (t_abs - t0_sec) * fs
+                    x0c = max(0.0, x0); x1c = min(float(total_len - 1), x1)
+                    if x1c > x0c:
+                        ax.hlines(y_seg, x0c, x1c, color=BEEP_SEG_COLOR,
+                                  lw=BEEP_SEG_LW, alpha=BEEP_SEG_ALPHA, zorder=6)
+                    if 0.0 <= xb <= (total_len - 1):
+                        ax.plot([xb], [y_seg], marker="o",
+                                markersize=BEEP_DOT_MS,
+                                markerfacecolor=BEEP_DOT_FC,
+                                markeredgecolor=BEEP_DOT_EC,
+                                zorder=7)
 
-def plot_label_verlauf(y_train, length):
-    plt.plot(np.arange(y_train[:length].shape[0]), y_train[:length])
-    plt.xlabel("windows")
-    plt.ylabel("Label")
+        # --- BEEP_RECOVER markers (optional) ---
+        if recover_times_base.size:
+            t0_sec = (k0 * stride) / float(fs)
+            t1_sec = t0_sec + (total_len / float(fs))
+
+            if seconds_per_recording > 0:
+                m_min = int(np.floor((t0_sec - recover_times_base[-1]) / seconds_per_recording)) - 1
+                m_max = int(np.ceil(t1_sec / seconds_per_recording)) + 1
+            else:
+                m_min, m_max = 0, 0
+
+            # y-level slightly below slouch markers to avoid overlap
+            y_span = (y_max - y_min)
+            y_seg2 = y_max - 0.08 * y_span
+
+            for m in range(m_min, m_max + 1):
+                base_shift = m * seconds_per_recording
+                if base_shift + recover_times_base[0] > t1_sec + post_beep:
+                    break
+                for t_rc in recover_times_base:
+                    t_abs = base_shift + t_rc
+                    if (t_abs + post_beep) < t0_sec or (t_abs - pre_beep) > t1_sec:
+                        continue
+                    x0 = (t_abs - pre_beep - t0_sec) * fs
+                    x1 = (t_abs + post_beep - t0_sec) * fs
+                    xb = (t_abs - t0_sec) * fs
+                    x0c = max(0.0, x0); x1c = min(float(total_len - 1), x1)
+                    if x1c > x0c:
+                        ax.hlines(y_seg2, x0c, x1c, color=REC_SEG_COLOR,
+                                  lw=REC_SEG_LW, alpha=REC_SEG_ALPHA, zorder=6)
+                    if 0.0 <= xb <= (total_len - 1):
+                        ax.plot([xb], [y_seg2], marker="o",
+                                markersize=REC_DOT_MS,
+                                markerfacecolor=REC_DOT_FC,
+                                markeredgecolor=REC_DOT_EC,
+                                zorder=7)
+
+        # --- participant separators (every 718 windows) ---
+        if SEP_EVERY > 0:
+            boundaries = np.arange(SEP_EVERY, n_windows_total, SEP_EVERY, dtype=int)
+            boundaries_in_view = boundaries[(boundaries >= k0) & (boundaries < k1)]
+            for b in boundaries_in_view:
+                x_sep = (b - k0) * stride
+                ax.axvline(x_sep, color=SEP_COLOR, lw=SEP_LW, alpha=SEP_ALPHA)
+
+        # --- thicker blue separators (every 2872 windows) ---
+        if SUPER_SEP_EVERY > 0:
+            boundaries2 = np.arange(SUPER_SEP_EVERY, n_windows_total, SUPER_SEP_EVERY, dtype=int)
+            boundaries2_in_view = boundaries2[(boundaries2 >= k0) & (boundaries2 < k1)]
+            for b in boundaries2_in_view:
+                x_sep = (b - k0) * stride
+                ax.axvline(x_sep, color=SUPER_SEP_COLOR, lw=SUPER_SEP_LW, alpha=SUPER_SEP_ALPHA)
+
+        ax.set_xlim(0, total_len - 1)
+        ax.set_ylim(y_min, y_max)
+        ax.set_xlabel("Frame")
+        ax.set_ylabel("Signal value")
+        end_idx = start_idx + n_plot - 1
+        ttl = title or (f"Reconstructed signal — channels {channels}, window={windows}, stride={stride} | "
+                        f"windows {start_idx}–{end_idx}")
+        ax.set_title(ttl)
+        ax.grid(True, alpha=0.3)
+
+        # legends
+        legend_channels = ax.legend(handles=channel_lines, loc="upper left", title="Channels")
+        unique_labels = sorted(set(int(v) for v in y_plot))
+        handles_labels = [Patch(facecolor=palette.get(k, "0.7"),
+                                edgecolor=palette.get(k, "0.7"),
+                                alpha=0.25,
+                                label=f"{k} – {(label_names[k] if label_names and 0<=k<len(label_names) else str(k))}")
+                         for k in unique_labels]
+        if handles_labels:
+            legend_labels = ax.legend(handles=handles_labels, loc="upper right", title="Window labels")
+            ax.add_artist(legend_channels)  # keep both legends
+        fig.canvas.draw_idle()
+
+    # initial draw
+    draw_slice(start_window)
+
+    # slider under the plot
+    ax_slider = fig.add_axes([0.12, 0.08, 0.76, 0.04])
+    s_start = Slider(ax_slider, "start_window", 0, max_start, valinit=start_window, valstep=1)
+
+    def on_change(val):
+        draw_slice(int(s_start.val))
+
+    s_start.on_changed(on_change)
     plt.show()
+    return fig, ax, s_start
 
 def main():
+    
     X_train, y_train = X_and_y("train", ['Mohid', 'Claire', 'Dario', 'David', 'Ivan']) #['Ivan', 'Dario', 'David', 'Claire', 'Mohid']
     #plot_label_verlauf(y_train, length=700)
-    plot_reconstructed_signal(
+    plot_reconstructed_signal_slider(
         X_train, y_train,
         windows=75,
-        chanel=[11, 12],
-        num_windows=240,    #100
-        start_window=0,     #0, 240, 480
-        show=True
+        chanel=[7, 11, 12], #4
+        view_windows=40,
+        start_window=0,
+        beep_schedule="data/beep_schedules_Claire0/beep_schedule_Claire0.csv",  # << path or DataFrame
+        fs=50.0,                                   # sampling rate of your frames
+        pre_beep=0.05, post_beep=0.90              # tweak if you like
     )
-
+    
     ##
+    # Delete delta files:
+    # delete_airpods_motion_d_csvs("data", dry_run=False)  # actually delete
     '''
     df = pd.read_csv(r"data/beep_schedules_Claire0/airpods_motion_d1760629578.csv")
     duration = 1600

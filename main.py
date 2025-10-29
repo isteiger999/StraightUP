@@ -15,10 +15,10 @@ warnings.filterwarnings("ignore", category=NotOpenSSLWarning)
 def main():
 
     participants = ['Ivan', 'Dario', 'David', 'Claire', 'Mohid']         # 'Ivaan', 'Svetlana'
-    combinations, mean, std = find_combinations(participants, fraction = 0.3)  # fraction 0.1 means cut off  
+    combinations, mean, std = find_combinations(participants, fraction = 1.0)  # fraction 0.1 means cut off  
     n = len(combinations)
     print(combinations)
-
+    
     edit_csv()
     
     cm_avg = ConfusionMatrixAverager(
@@ -35,8 +35,8 @@ def main():
         X_test, y_test = X_and_y("test", list_comb)
         
         # 2. Train & Evaluate CNN
-        model, history = CNN_model(X_train, y_train, X_val, y_val, verbose = 1)
-        #model, history = train_eval_tcn(X_train, y_train, X_val, y_val, verbose=1)
+        #model, history = CNN_model(X_train, y_train, X_val, y_val, verbose = 1)
+        model, history = train_eval_tcn(X_train, y_train, X_val, y_val, verbose=1)
 
         # 3. Testing the CNN
         scores = model.evaluate(X_test, y_test, return_dict=True, verbose = 1)
@@ -51,10 +51,10 @@ def main():
         
 
     # calculate std only now, after mean has already been calculated
-    std_mean(mean, std)
+    std_mean(mean, std) 
 
     # print Confusion matrix (0 = upright, 1 = transition, 2 = slouch)
-    png_recall = cm_avg.save_figure(model_tag="cnn", normalize="true")  # recall view (for precision use normalize="pred")
+    png_recall = cm_avg.save_figure(model_tag="tcn", normalize="true")  # recall view (for precision use normalize="pred")
     print("✅ Saved averaged confusion matrix")
     
 

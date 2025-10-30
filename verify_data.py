@@ -310,12 +310,12 @@ def main():
     
     X_train, y_train = X_and_y("train", ['David', 'Ivan', 'Claire', 'Mohid', 'Dario'],
                                label_anchor='center') #['Ivan', 'Dario', 'David', 'Claire', 'Mohid']
-    plot_label_verlauf(y_train, length=700)
+    #plot_label_verlauf(y_train, length=700)
 
     plot_reconstructed_signal_slider(
         X_train, y_train,
         windows=75,
-        chanel=[7, 11, 12], #4
+        chanel=[0, 7, 11, 12], #4
         view_windows=100,
         start_window=0
     )

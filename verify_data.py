@@ -117,35 +117,14 @@ def plot_reconstructed_signal_slider(
     show_vlines: bool = True,
     title: Optional[str] = None,
     figsize: Tuple[int, int] = (12, 4),
-
-    # --- NEW OPTIONAL ARGS (default values preserve old behavior) ---
-    beep_schedule: Optional[
-        Union[str, pd.DataFrame, Sequence[Tuple[float, str, str]]]
-    ] = None,                       # CSV path | DataFrame | iterable of (t_sec, event, value)
-    fs: float = 50.0,               # sampling rate [Hz] to convert seconds -> frames
-    pre_beep: float = 0.05,         # seconds to draw to the LEFT of beep
-    post_beep: float = 0.90,        # seconds to draw to the RIGHT of beep
 ):
     """
     Interactive viewer: same visualization as plot_reconstructed_signal,
     but with a horizontal slider to move the start window. Always shows
     exactly `view_windows` windows at a time.
 
-    Adds thick separators after every 718 windows to mark participant changes.
-    Also (optional) overlays short horizontal line segments centered on
-    each BEEP_SLOUCH and BEEP_RECOVER event (from `beep_schedule`) and
-    a dot at the beep time.
-
-    Parameters (new)
-    ---------------
-    beep_schedule : str | pandas.DataFrame | iterable[(t_sec, event, value)] | None
-        If provided, all 'BEEP_SLOUCH' and 'BEEP_RECOVER' times are extracted
-        and shown. Interpreted as seconds from the start of a recording.
-        The pattern is repeated every 718 windows so it lines up with each recording.
-    fs : float
-        Sampling rate [Hz] to convert seconds -> frame indices. Defaults to 50.0.
-    pre_beep, post_beep : float
-        Seconds to extend the marker segment left/right of the beep time.
+    Adds thick separators after every 718 windows to mark participant changes,
+    and even thicker blue separators every 2872 windows.
     """
     # ---- config for participant separators ----
     SEP_EVERY = 718              # black separators every 718 windows
@@ -158,22 +137,6 @@ def plot_reconstructed_signal_slider(
     SUPER_SEP_COLOR = "#1f77b4"  # matplotlib's default blue
     SUPER_SEP_LW = 4.5           # a bit thicker than the 718-line
     SUPER_SEP_ALPHA = 0.95
-
-    # ---- style for BEEP_SLOUCH markers ----
-    BEEP_SEG_LW = 2.6
-    BEEP_SEG_ALPHA = 0.95
-    BEEP_SEG_COLOR = "#9467bd"   # purple (distinct from class bands)
-    BEEP_DOT_MS = 6.5
-    BEEP_DOT_FC = "white"
-    BEEP_DOT_EC = "black"
-
-    # ---- style for BEEP_RECOVER markers ----
-    REC_SEG_LW = 2.6
-    REC_SEG_ALPHA = 0.95
-    REC_SEG_COLOR = "#17becf"    # cyan (distinct from bands & slouch)
-    REC_DOT_MS = 6.5
-    REC_DOT_FC = "white"
-    REC_DOT_EC = "black"
 
     # --- normalize channel argument (keep your original 'chanel' spelling) ---
     if isinstance(chanel, (int, np.integer)):
@@ -252,47 +215,6 @@ def plot_reconstructed_signal_slider(
 
     palette = {0: "#2ca02c", 1: "#ff7f0e", 2: "#d62728"}  # upright/transition/slouch
 
-    # --- precompute event base times (seconds) from schedule, if any ---
-    def _extract_slouch_times_sec(schedule) -> np.ndarray:
-        if schedule is None:
-            return np.empty(0, dtype=float)
-        if isinstance(schedule, str):
-            df = pd.read_csv(schedule)
-        elif isinstance(schedule, pd.DataFrame):
-            df = schedule
-        else:
-            # assume iterable of (t_sec, event, value)
-            df = pd.DataFrame(list(schedule), columns=["t_sec", "event", "value"])
-        if "t_sec" not in df.columns or "event" not in df.columns:
-            return np.empty(0, dtype=float)
-        df = df.copy()
-        df["t_sec"] = pd.to_numeric(df["t_sec"], errors="coerce")
-        sl = df[df["event"].astype(str).str.upper() == "BEEP_SLOUCH"]["t_sec"].dropna()
-        return np.sort(sl.to_numpy(dtype=float))
-
-    def _extract_recover_times_sec(schedule) -> np.ndarray:
-        if schedule is None:
-            return np.empty(0, dtype=float)
-        if isinstance(schedule, str):
-            df = pd.read_csv(schedule)
-        elif isinstance(schedule, pd.DataFrame):
-            df = schedule
-        else:
-            df = pd.DataFrame(list(schedule), columns=["t_sec", "event", "value"])
-        if "t_sec" not in df.columns or "event" not in df.columns:
-            return np.empty(0, dtype=float)
-        df = df.copy()
-        df["t_sec"] = pd.to_numeric(df["t_sec"], errors="coerce")
-        rc = df[df["event"].astype(str).str.upper() == "BEEP_RECOVER"]["t_sec"].dropna()
-        return np.sort(rc.to_numpy(dtype=float))
-
-    slouch_times_base = _extract_slouch_times_sec(beep_schedule)   # seconds within ONE recording
-    recover_times_base = _extract_recover_times_sec(beep_schedule) # seconds within ONE recording
-
-    # Each recording spans 718 windows; convert that span to seconds via fs/stride/windows
-    frames_per_recording = (SEP_EVERY - 1) * stride + windows
-    seconds_per_recording = frames_per_recording / float(fs)
-
     # --- plotting & slider ---
     fig, ax = plt.subplots(figsize=figsize)
     plt.subplots_adjust(bottom=0.22)  # room for the slider
@@ -330,81 +252,6 @@ def plot_reconstructed_signal_slider(
                     ax.axvspan(s, e, color=c, alpha=0.12, lw=0)
                 if show_vlines:
                     ax.axvline(s, color=c, alpha=0.8, lw=0.8)
-
-        # --- BEEP_SLOUCH markers (optional) ---
-        if slouch_times_base.size:
-            # Absolute time of view [t0_sec, t1_sec]
-            t0_sec = (k0 * stride) / float(fs)
-            t1_sec = t0_sec + (total_len / float(fs))
-
-            if seconds_per_recording > 0:
-                m_min = int(np.floor((t0_sec - slouch_times_base[-1]) / seconds_per_recording)) - 1
-                m_max = int(np.ceil(t1_sec / seconds_per_recording)) + 1
-            else:
-                m_min, m_max = 0, 0
-
-            # y-level near the top for visibility
-            y_span = (y_max - y_min)
-            y_seg = y_max - 0.04 * y_span
-
-            for m in range(m_min, m_max + 1):
-                base_shift = m * seconds_per_recording
-                if base_shift + slouch_times_base[0] > t1_sec + post_beep:
-                    break
-                for t_sl in slouch_times_base:
-                    t_abs = base_shift + t_sl
-                    if (t_abs + post_beep) < t0_sec or (t_abs - pre_beep) > t1_sec:
-                        continue
-                    x0 = (t_abs - pre_beep - t0_sec) * fs
-                    x1 = (t_abs + post_beep - t0_sec) * fs
-                    xb = (t_abs - t0_sec) * fs
-                    x0c = max(0.0, x0); x1c = min(float(total_len - 1), x1)
-                    if x1c > x0c:
-                        ax.hlines(y_seg, x0c, x1c, color=BEEP_SEG_COLOR,
-                                  lw=BEEP_SEG_LW, alpha=BEEP_SEG_ALPHA, zorder=6)
-                    if 0.0 <= xb <= (total_len - 1):
-                        ax.plot([xb], [y_seg], marker="o",
-                                markersize=BEEP_DOT_MS,
-                                markerfacecolor=BEEP_DOT_FC,
-                                markeredgecolor=BEEP_DOT_EC,
-                                zorder=7)
-
-        # --- BEEP_RECOVER markers (optional) ---
-        if recover_times_base.size:
-            t0_sec = (k0 * stride) / float(fs)
-            t1_sec = t0_sec + (total_len / float(fs))
-
-            if seconds_per_recording > 0:
-                m_min = int(np.floor((t0_sec - recover_times_base[-1]) / seconds_per_recording)) - 1
-                m_max = int(np.ceil(t1_sec / seconds_per_recording)) + 1
-            else:
-                m_min, m_max = 0, 0
-
-            # y-level slightly below slouch markers to avoid overlap
-            y_span = (y_max - y_min)
-            y_seg2 = y_max - 0.08 * y_span
-
-            for m in range(m_min, m_max + 1):
-                base_shift = m * seconds_per_recording
-                if base_shift + recover_times_base[0] > t1_sec + post_beep:
-                    break
-                for t_rc in recover_times_base:
-                    t_abs = base_shift + t_rc
-                    if (t_abs + post_beep) < t0_sec or (t_abs - pre_beep) > t1_sec:
-                        continue
-                    x0 = (t_abs - pre_beep - t0_sec) * fs
-                    x1 = (t_abs + post_beep - t0_sec) * fs
-                    xb = (t_abs - t0_sec) * fs
-                    x0c = max(0.0, x0); x1c = min(float(total_len - 1), x1)
-                    if x1c > x0c:
-                        ax.hlines(y_seg2, x0c, x1c, color=REC_SEG_COLOR,
-                                  lw=REC_SEG_LW, alpha=REC_SEG_ALPHA, zorder=6)
-                    if 0.0 <= xb <= (total_len - 1):
-                        ax.plot([xb], [y_seg2], marker="o",
-                                markersize=REC_DOT_MS,
-                                markerfacecolor=REC_DOT_FC,
-                                markeredgecolor=REC_DOT_EC,
-                                zorder=7)
 
         # --- participant separators (every 718 windows) ---
         if SEP_EVERY > 0:
@@ -461,19 +308,16 @@ def plot_reconstructed_signal_slider(
 
 def main():
     
-    X_train, y_train = X_and_y("train", ['Claire', 'Mohid', 'David', 'Ivan', 'Dario'],
+    X_train, y_train = X_and_y("train", ['David', 'Ivan', 'Claire', 'Mohid', 'Dario'],
                                label_anchor='center') #['Ivan', 'Dario', 'David', 'Claire', 'Mohid']
     plot_label_verlauf(y_train, length=700)
-    
+
     plot_reconstructed_signal_slider(
         X_train, y_train,
         windows=75,
         chanel=[7, 11, 12], #4
         view_windows=100,
-        start_window=0,
-        beep_schedule="data/beep_schedules_Claire0/beep_schedule_Claire0.csv",  # << path or DataFrame
-        fs=50.0,                                   # sampling rate of your frames
-        pre_beep=0.05, post_beep=0.90              # tweak if you like
+        start_window=0
     )
     
     ##

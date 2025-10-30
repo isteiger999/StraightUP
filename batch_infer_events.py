@@ -15,7 +15,7 @@ Key behavior:
   Slouch vs. non-slouch sets define event names.
 
 Usage:
-    python batch_infer_events.py --verbose --pre 0.2 --post 1.0
+    python batch_infer_events.py --verbose --pre 0.2 --post 1.0 --offset 2.0
 """
 
 import argparse, csv, os, re, sys
@@ -214,7 +214,7 @@ def write_upright_only_outputs(imu_csv: str, out_csv: str, debug_csv: str, verbo
 
 def synthesize_events_from_schedule(imu_csv: str, schedule_csv: str, out_csv: str,
                                     debug_csv: str, pre_s: float, post_s: float,
-                                    verbose: bool=False) -> dict:
+                                    offset_s: float = 0.0, verbose: bool=False) -> dict:
     # --- IMU time axis ---
     imu = pd.read_csv(imu_csv)
     t_sec, t_units = get_time_seconds(imu)
@@ -235,6 +235,14 @@ def synthesize_events_from_schedule(imu_csv: str, schedule_csv: str, out_csv: st
     sch = pd.read_csv(schedule_csv)
     if "t_sec" not in sch.columns:
         raise RuntimeError("Schedule missing t_sec column.")
+
+    # NEW: apply user-provided offset (subtract seconds from every schedule row)
+    if offset_s != 0.0:
+        sch = sch.copy()
+        sch["t_sec"] = pd.to_numeric(sch["t_sec"], errors="coerce") - float(offset_s)
+        if verbose:
+            print(f"[align] schedule: subtracted offset {offset_s:.3f}s from t_sec")
+
     sch_aligned, shift, mode = align_schedule_times(sch, t0, t1, verbose=verbose)
 
     if verbose:
@@ -315,6 +323,8 @@ def main():
                     help="Seconds before a beep to place *onset* events (default: 0.2).")
     ap.add_argument("--transition-post", "--post", dest="post", type=float, default=1.0,
                     help="Seconds after a beep to place *hold* events (default: 1.0).")
+    ap.add_argument("--offset", type=float, default=0.0,
+                    help="Seconds to SUBTRACT from every schedule t_sec before alignment (default: 0.0).")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -354,7 +364,7 @@ def main():
         try:
             stats = synthesize_events_from_schedule(
                 imu_csv, schedule_csv, out_csv, debug_csv,
-                pre_s=args.pre, post_s=args.post, verbose=args.verbose
+                pre_s=args.pre, post_s=args.post, offset_s=args.offset, verbose=args.verbose
             )
             ok = True
         except Exception as e:

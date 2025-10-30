@@ -1512,10 +1512,37 @@ def find_shapes():
 
 # -----------------------------
 
-def X_and_y(type, list_comb):
+def X_and_y(type, list_comb, label_anchor: str = "end"):
+    """
+    Build X (windows) and y (labels) across selected folders.
+
+    Parameters
+    ----------
+    type : {'train','val','test'}
+    list_comb : list[str]
+    label_anchor : {'start','center','end'}, default 'end'
+        - 'start' : label at the window start time  (t = t0 + i*stride)
+        - 'center': label at the window mid time    (t = t0 + i*stride + 0.5*len_window_sec)
+        - 'end'   : label at the window end time    (t = t0 + i*stride + len_window_sec)
+                     (this matches your original function)
+    """
+    # --- normalize anchor choice & map to offset in SECONDS ---
+    anchor = str(label_anchor).strip().lower()
+    if anchor not in {"start", "center", "end"}:
+        print(f"[warn] Unknown label_anchor={anchor!r}; falling back to 'end'.")
+        anchor = "end"
+
     matching_folders, n_folders = folders_tot(type, list_comb)
     _, _, _, win_len_frames, stride_frames, _, windows_per_rec, stride, len_window_sec = find_shapes()
     
+    # seconds offset to add to t0 + i*stride for the label timestamp
+    if anchor == "start":
+        anchor_offset_sec = 0.0
+    elif anchor == "center":
+        anchor_offset_sec = 0.5 * float(len_window_sec)
+    else:  # "end"
+        anchor_offset_sec = float(len_window_sec)
+
     X_tot = None
     y_tot = np.zeros((n_folders * windows_per_rec, 1), dtype=int)
 
@@ -1555,11 +1582,12 @@ def X_and_y(type, list_comb):
         times = ev['t_sec'].astype(float).to_numpy()
         names = ev['event'].astype(str).tolist()
         
-        # --- Labels: state at window END on IMU axis ---
+        # --- Labels: state at chosen ANCHOR time on IMU axis (seconds) ---
+        # Using seconds like your original avoids tail indexing issues.
         m = 0.0  # manual offsets already encode margins
         labels_array = np.zeros((windows_per_rec, 1), dtype=int)
         for i in range(windows_per_rec):
-            current_time = t0 + len_window_sec + i * stride
+            current_time = t0 + i * float(stride) + anchor_offset_sec
             labels_array[i, 0] = label_at_time(current_time, names, times, m)
         
         y_tot[index*windows_per_rec:(index+1)*windows_per_rec, 0:1] = labels_array
@@ -1596,6 +1624,3 @@ def X_and_y(type, list_comb):
             X_tot[base + i, :, :] = win
 
     return X_tot, y_tot
-
-
-

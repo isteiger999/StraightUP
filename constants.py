@@ -89,7 +89,7 @@ python generate_beep_schedule_5m15s.py `
 # Everyone
 python batch_infer_events.py --verbose
 python batch_infer_events.py --verbose --pre 0.05 --post 0.9
-
+python batch_infer_events.py --verbose --pre 0.05 --post 0.9 --offset 2.0
 '''
 
 

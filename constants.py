@@ -56,10 +56,6 @@ def configure_tensorflow():
     tf.config.threading.set_intra_op_parallelism_threads(1)
 
 
-## To generate 3 files: 
-#               1. schedule.csv, beep sound (mav file), 
-#               2. beep sound (mav file), 
-#               3. empty csv (to be filled by detector)
 ''' (jitter is probabilistic)
 python generate_beep_schedule_5m15s.py --participant Test0 \
   --minutes 5 --cycle-len 15 --jitter 1.0 --initial-delay 2.0 --make-wav \
@@ -81,17 +77,18 @@ python generate_beep_schedule_5m15s.py `
 '''
 
 '''
-# individually
-(NICHT NUTZEN, BESSER IMMER ALLE GLEICH) python batch_infer_events.py --participants David0 --verbose
-'''
-
-'''
 # Everyone
 python batch_infer_events.py --verbose
 python batch_infer_events.py --verbose --pre 0.05 --post 0.9
 python batch_infer_events.py --verbose --pre 0.05 --post 0.9 --offset 2.0
 '''
-
+'''
+# Single Person
+python batch_infer_events.py \
+  --root data/beep_schedules_Svetlana0 \
+  --glob "airpods_motion_*.csv" \
+  --verbose --pre 0.55 --post -0.45 --offset 1.45
+'''
 
 '''
 Vom Laptop/Mac git pullen (nicht bloss git pull):

@@ -605,73 +605,6 @@ def _choose_events_file_for(csv_path: str,
 
     return best or candidates[0]
 
-def _extract_upright_windows(events_df: pd.DataFrame,
-                             t_end: float,
-                             start_event: str = "UPRIGHT_HOLD_START",
-                             end_events: Tuple[str, ...] = ("SLOUCH_START", "UPRIGHT_HOLD_START"),
-                             min_window_seconds: float = 0.5) -> List[Tuple[float, float]]:
-    """
-    Scan events chronologically and return (start, end) windows for upright holds.
-    A window starts at UPRIGHT_HOLD_START and ends at the next SLOUCH_START
-    (or at the next UPRIGHT_HOLD_START if it appears earlier). If the recording
-    ends while upright, close the last window at t_end.
-    """
-    df = events_df.copy()
-    if "t_sec" not in df.columns or "event" not in df.columns:
-        return []
-
-    df["t_sec"] = pd.to_numeric(df["t_sec"], errors="coerce")
-    df = df.dropna(subset=["t_sec"]).sort_values("t_sec")
-
-    windows: List[Tuple[float, float]] = []
-    current_start: Optional[float] = None
-
-    for _, row in df.iterrows():
-        ev = str(row["event"])
-        ts = float(row["t_sec"])
-
-        if ev == start_event:
-            # if we already were in an upright window, close it here (defensive)
-            if current_start is not None and ts > current_start:
-                dur = ts - current_start
-                if dur >= min_window_seconds:
-                    windows.append((current_start, ts))
-            current_start = ts
-        elif ev in end_events and current_start is not None and ts > current_start:
-            dur = ts - current_start
-            if dur >= min_window_seconds:
-                windows.append((current_start, ts))
-            current_start = None
-
-    # If recording ends while upright, close the last window at t_end
-    if current_start is not None and t_end > current_start:
-        dur = t_end - current_start
-        if dur >= min_window_seconds:
-            windows.append((current_start, t_end))
-
-    return windows
-
-def _upright_segments(events_df: pd.DataFrame, t_end: float) -> List[Tuple[float, float]]:
-    """
-    Return epoch segments driven by UPRIGHT_HOLD_START:
-      [(u0, u1), (u1, u2), ..., (u_last, t_end)]
-    Each segment receives the baseline computed from its own upright-only window.
-    """
-    if "t_sec" not in events_df.columns or "event" not in events_df.columns:
-        return []
-
-    df = events_df[events_df["event"] == "UPRIGHT_HOLD_START"].copy()
-    if df.empty:
-        return []
-
-    u = pd.to_numeric(df["t_sec"], errors="coerce").dropna().sort_values().tolist()
-    segments: List[Tuple[float, float]] = []
-    for i, s in enumerate(u):
-        e = u[i + 1] if i + 1 < len(u) else t_end
-        if e > s:
-            segments.append((float(s), float(e)))
-    return segments
-
 def is_delta_motion_file(path: str) -> bool:
     """True if this looks like a delta motion csv (airpods_motion_d*.csv)."""
     return os.path.basename(path).startswith("airpods_motion_d")
@@ -685,23 +618,39 @@ def calculate_deltas(
     id_cols: Optional[List[str]] = None,   # preserved (not baseline-subtracted) for NUMERIC channels
     baseline_method: str = "mean",         # "mean" or "median" for NUMERIC channels
     min_window_seconds: float = 0.5,
-    scope: str = "per_upright_epoch",      # default: per-epoch rebaselining
+    scope: str = "per_upright_epoch",      # kept for backward-compat; see behavior below
     apply_global_to_gaps: bool = True,     # apply global upright baseline outside epochs
     reuse_last_baseline: bool = True,      # if an epoch has no upright samples
     add_epoch_id: bool = False,            # optional debug column
-    verbose: bool = True
+    verbose: bool = True,
+    # NEW: do NOT delta these (kept raw)
+    no_delta_cols: Optional[List[str]] = None,
+    # NEW: when forming upright baselines, trim 1s off both ends by default
+    edge_trim_seconds: float = 1.0,
 ) -> Tuple[pd.DataFrame, Dict[str, float], List[Tuple[float, float]]]:
     """
-    Convert IMU channels to per-epoch deltas AND compute per-epoch relative quaternions.
+    Convert IMU channels to deltas and compute relative quaternions.
 
-    - Non-quaternion numeric columns: baseline-subtracted per epoch (or globally in gaps).
-    - Quaternions: replaced by relative quaternions (quat_rel_x/y/z/w), computed as:
-          quat_rel = quat_sample ⊗ conj(q_base_epoch)
-      where q_base_epoch is the (unit) mean quaternion over the upright-only window
-      that starts at each UPRIGHT_HOLD_START. For gaps, uses a global upright q_base.
-      Sign continuity is enforced within each block and across adjacent blocks.
+    Key behavior:
+    - Numeric channels: per-epoch delta relative to an upright baseline,
+      EXCEPT for any in `no_delta_cols` (which are kept raw).
+    - Relative quaternions: for each epoch, compute the baseline quaternion
+      from the *pre-movement upright* window, trimmed by `edge_trim_seconds`
+      at both start and end, then apply q_rel = q_sample ⊗ conj(q_base_epoch).
+    - Epochs are defined only by *valid pre-movement uprights*:
+        upright_start < movement_start < next_upright_start
+      Any "upright" occurring inside a movement is ignored.
+    - Global fallbacks are built from the union of all trimmed upright windows.
+      If none exist, fall back to the whole recording.
 
-    Returned df contains quat_rel_* and DOES NOT contain the raw quat_* columns.
+    Returns
+    -------
+    df_delta : DataFrame
+        Transformed IMU with numeric deltas, quat_rel_* columns, and without raw quat_*.
+    global_numeric_baseline : Dict[str, float]
+        Global numeric baselines used as fallback.
+    windows_trimmed : List[Tuple[float,float]]
+        The trimmed upright windows actually used to build baselines.
     """
 
     # ---------------- helpers: quaternion math ----------------
@@ -712,7 +661,6 @@ def calculate_deltas(
         return (len(present) == 4, present)
 
     def _q_normalize(q: np.ndarray) -> np.ndarray:
-        # q: (..., 4) in (x, y, z, w) order
         eps = 1e-12
         n = np.linalg.norm(q, axis=-1, keepdims=True)
         n = np.where(n < eps, 1.0, n)
@@ -720,7 +668,7 @@ def calculate_deltas(
 
     def _q_conj(q: np.ndarray) -> np.ndarray:
         qc = q.copy()
-        qc[..., 0:3] *= -1.0  # negate vector part (x,y,z), keep w
+        qc[..., 0:3] *= -1.0  # negate vector part (x,y,z)
         return qc
 
     def _q_mul(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
@@ -738,31 +686,25 @@ def calculate_deltas(
 
     def _q_mean(qs: np.ndarray) -> Optional[np.ndarray]:
         """
-        Approximate mean quaternion (Markley-style, sign aligned to first).
+        Approximate mean quaternion (Markley-style, hemisphere aligned).
         qs: (N,4) with possible NaNs; returns (4,) unit quat or None if insufficient data.
         """
         if qs.size == 0:
             return None
-        # drop rows with any NaN
         mask = ~np.isnan(qs).any(axis=1)
         qs = qs[mask]
         if qs.shape[0] == 0:
             return None
         qs = _q_normalize(qs)
-
-        # align signs to the first quaternion's hemisphere
         q0 = qs[0]
         dots = np.sum(qs * q0, axis=1)
         qs[dots < 0] *= -1.0
-
         q_mean = np.mean(qs, axis=0)
-        q_mean = _q_normalize(q_mean)
-        return q_mean
+        return _q_normalize(q_mean)
 
     def _ensure_continuity(qs: np.ndarray) -> np.ndarray:
         """
         Flip sign to enforce continuity along time: qs[i] ~ qs[i-1].
-        In-place safe; returns qs for convenience.
         """
         if qs.shape[0] == 0:
             return qs
@@ -770,6 +712,74 @@ def calculate_deltas(
             if np.dot(qs[i], qs[i - 1]) < 0:
                 qs[i] *= -1.0
         return qs
+
+    def _pre_movement_uprights(
+        events_df: pd.DataFrame,
+        t_end: float,
+        *,
+        edge_trim_seconds: float = 1.0,
+        min_window_seconds: float = 0.5
+    ) -> Tuple[Dict[float, Tuple[float, float]], List[Tuple[float, float]], List[Tuple[float, float]]]:
+        """
+        Identify 'true' uprights that precede a movement and build:
+          - baseline_window_by_start:  {upright_start -> (upright_start+trim, movement_start-trim)}
+          - windows_trimmed:           list of (baseline_start, baseline_end) across all trials
+          - segments:                  [(u0, u1), (u1, u2), ..., (u_last, t_end)]
+                                       built only from those valid pre-movement uprights.
+
+        A 'movement start' is any event whose name ends with '_START' and is not 'UPRIGHT_HOLD_START'.
+        A valid upright is one whose next movement start occurs *before* the next upright start:
+            upright_start < movement_start < next_upright_start
+        This ignores 'upright' detections that occur inside an ongoing movement.
+        """
+        df = events_df.copy()
+        if "t_sec" not in df.columns or "event" not in df.columns:
+            return {}, [], []
+
+        df = df.dropna(subset=["t_sec", "event"]).copy()
+        df["t_sec"] = pd.to_numeric(df["t_sec"], errors="coerce")
+        df = df.dropna(subset=["t_sec"]).sort_values("t_sec")
+
+        ev_upper = df["event"].astype(str).str.upper()
+        is_upright = (ev_upper == "UPRIGHT_HOLD_START")
+        uprights = df.loc[is_upright, "t_sec"].to_numpy(dtype=float)
+
+        # movement start = any *_START except UPRIGHT_HOLD_START
+        is_start = ev_upper.str.endswith("_START") & ~is_upright
+        mov_starts = df.loc[is_start, "t_sec"].to_numpy(dtype=float)
+
+        uprights = np.sort(uprights)
+        mov_starts = np.sort(mov_starts)
+
+        baseline_window_by_start: Dict[float, Tuple[float, float]] = {}
+        windows_trimmed: List[Tuple[float, float]] = []
+        valid_starts: List[float] = []
+
+        for i, u in enumerate(uprights):
+            u_next = uprights[i + 1] if (i + 1) < len(uprights) else t_end
+            # next movement strictly after u
+            j = np.searchsorted(mov_starts, u, side="right")
+            m = mov_starts[j] if j < len(mov_starts) else None
+
+            # valid pre-movement upright: u < m < u_next
+            if m is None or not (u < m < u_next):
+                continue
+
+            s_trim = u + float(edge_trim_seconds)
+            e_trim = m - float(edge_trim_seconds)
+            if e_trim - s_trim >= max(min_window_seconds, 0.0):
+                baseline_window_by_start[u] = (s_trim, e_trim)
+                windows_trimmed.append((s_trim, e_trim))
+                valid_starts.append(u)
+
+        # segments are formed only by valid uprights
+        segments: List[Tuple[float, float]] = []
+        for i, s in enumerate(valid_starts):
+            e = valid_starts[i + 1] if (i + 1) < len(valid_starts) else t_end
+            if e > s:
+                segments.append((float(s), float(e)))
+
+        return baseline_window_by_start, windows_trimmed, segments
 
     # ---------------- detect timestamp & events ----------------
     if not timestamp_col:
@@ -788,27 +798,42 @@ def calculate_deltas(
         except Exception:
             events_df = None
 
-    # ---------------- time vector & epochs ----------------
+    # ---------------- time vector ----------------
     t_series = pd.to_numeric(df_imu[timestamp_col], errors="coerce").dropna()
     if t_series.empty:
         raise ValueError(f"Timestamp column '{timestamp_col}' contains no numeric values.")
     t_end = float(t_series.max())
     t = pd.to_numeric(df_imu[timestamp_col], errors="coerce").values
 
-    windows: List[Tuple[float, float]] = []
-    segments: List[Tuple[float, float]] = []
-    if events_df is not None and not events_df.empty:
-        windows = _extract_upright_windows(events_df, t_end=t_end, min_window_seconds=min_window_seconds)
-        segments = _upright_segments(events_df, t_end=t_end)
-
     # ---------------- columns ----------------
-    has_quat, quat_cols = _has_quats(df_imu)  # raw quaternion column names (in original case)
+    has_quat, quat_cols = _has_quats(df_imu)
     if id_cols is None:
         id_cols = [timestamp_col]
     id_set = set(id_cols)
     numeric_cols = df_imu.select_dtypes(include=[np.number]).columns.tolist()
-    # non-quaternion numeric columns to subtract deltas from
-    delta_cols = [c for c in numeric_cols if c not in id_set and (not has_quat or c not in quat_cols)]
+
+    # keep these raw (no delta)
+    if no_delta_cols is None:
+        no_delta_cols = ["acc_x", "acc_y", "acc_z", "rot_x", "rot_y", "rot_z"]
+    lower_map = {c.lower(): c for c in df_imu.columns}
+    protected = {lower_map[c.lower()] for c in no_delta_cols if c.lower() in lower_map}
+
+    # numeric delta candidates = numeric minus ids, quats, protected
+    delta_cols = [c for c in numeric_cols
+                  if (c not in id_set) and (not has_quat or c not in quat_cols) and (c not in protected)]
+
+    # ---------------- discover pre-movement upright windows & segments ----------------
+    baseline_window_by_start: Dict[float, Tuple[float, float]] = {}
+    windows_trimmed: List[Tuple[float, float]] = []
+    segments: List[Tuple[float, float]] = []
+
+    if events_df is not None and not events_df.empty:
+        baseline_window_by_start, windows_trimmed, segments = _pre_movement_uprights(
+            events_df,
+            t_end,
+            edge_trim_seconds=edge_trim_seconds,
+            min_window_seconds=min_window_seconds,
+        )
 
     # ---------------- numeric baseline aggregator ----------------
     def _agg_numeric(df_sub: pd.DataFrame) -> Dict[str, float]:
@@ -819,9 +844,9 @@ def calculate_deltas(
         return df_sub[delta_cols].mean(numeric_only=True).to_dict()
 
     # ---------------- global numeric & quaternion baselines ----------------
-    if windows:
+    if windows_trimmed:
         mask_upright_all = np.zeros(len(df_imu), dtype=bool)
-        for (s, e) in windows:
+        for (s, e) in windows_trimmed:
             mask_upright_all |= (t >= s) & (t < e)
         global_numeric_baseline = _agg_numeric(df_imu.loc[mask_upright_all]) if mask_upright_all.any() else _agg_numeric(df_imu)
         if has_quat:
@@ -832,11 +857,7 @@ def calculate_deltas(
             q_base_global = None
     else:
         global_numeric_baseline = _agg_numeric(df_imu)
-        if has_quat:
-            Q_all = df_imu[quat_cols].to_numpy(dtype=float)
-            q_base_global = _q_mean(Q_all)
-        else:
-            q_base_global = None
+        q_base_global = _q_mean(df_imu[quat_cols].to_numpy(dtype=float)) if has_quat else None
 
     df_delta = df_imu.copy()
 
@@ -851,33 +872,32 @@ def calculate_deltas(
         # relative quaternions (global baseline)
         if has_quat and q_base_global is not None:
             Q = df_imu[quat_cols].to_numpy(dtype=float)
-            # handle NaNs per-row
             valid = ~np.isnan(Q).any(axis=1)
-            Qn = _q_normalize(Q[valid])
-            q_base_conj = _q_conj(_q_normalize(q_base_global))
-            Qrel = _q_mul(Qn, q_base_conj)
-            Qrel = _ensure_continuity(Qrel)  # continuity across the whole file
-            # write out
-            rel_cols = ["quat_rel_x", "quat_rel_y", "quat_rel_z", "quat_rel_w"]
-            for i, name in enumerate(rel_cols):
-                df_delta[name] = np.nan
-                df_delta.loc[valid, name] = Qrel[:, i]
+            if np.any(valid):
+                Qn = _q_normalize(Q[valid])
+                q_base_conj = _q_conj(_q_normalize(q_base_global))
+                Qrel = _q_mul(Qn, q_base_conj)
+                Qrel = _ensure_continuity(Qrel)
+                rel_cols = ["quat_rel_x", "quat_rel_y", "quat_rel_z", "quat_rel_w"]
+                for i, name in enumerate(rel_cols):
+                    df_delta[name] = np.nan
+                    df_delta.loc[valid, name] = Qrel[:, i]
             # drop raw quats
-            df_delta.drop(columns=quat_cols, inplace=True, errors="ignore")
+            if has_quat:
+                df_delta.drop(columns=quat_cols, inplace=True, errors="ignore")
 
         if add_epoch_id:
             df_delta["epoch_id"] = -1
 
         if verbose:
-            source = "upright_windows" if windows else "global"
+            source = "upright_trimmed" if windows_trimmed else "global"
             print(f"Δ-baseline: {baseline_method} / global from {source} "
-                  f"(windows={len(windows)}, samples_used={len(df_imu)}). "
-                  f"Transformed {len(delta_cols)} channels. Quat_rel={'yes' if has_quat else 'no'}. "
-                  f"Time='{timestamp_col}'.")
-        return df_delta, global_numeric_baseline, windows
+                  f"(windows={len(windows_trimmed)}, samples_used={len(df_imu)}). "
+                  f"Transformed {len(delta_cols)} channels (kept {len(protected)} raw). "
+                  f"Quat_rel={'yes' if has_quat else 'no'}. Time='{timestamp_col}'.")
+        return df_delta, global_numeric_baseline, windows_trimmed
 
-    # ---------------- scope: PER-UPRIGHT-EPOCH ----------------
-    baseline_window_by_start: Dict[float, Tuple[float, float]] = {s: (s, e) for (s, e) in windows}
+    # ---------------- scope: PER PRE-MOVEMENT UPRIGHT EPOCH ----------------
     touched = np.zeros(len(df_imu), dtype=bool)
     epoch_ids = np.full(len(df_imu), -1, dtype=int)
     last_numeric_baseline: Optional[Dict[str, float]] = None
@@ -892,20 +912,20 @@ def calculate_deltas(
         last_rel_tail: Optional[np.ndarray] = None  # for sign continuity across blocks
 
     for epoch_idx, (seg_start, seg_end) in enumerate(segments):
-        # ----- numeric baseline for this epoch -----
+        # ----- numeric baseline for this epoch from trimmed pre-movement upright -----
         bw = baseline_window_by_start.get(seg_start)
         if bw is not None:
             b_start, b_end = bw
             m_b = (t >= b_start) & (t < b_end)
-            if m_b.any():
-                numeric_baseline = _agg_numeric(df_imu.loc[m_b])
+            numeric_baseline = _agg_numeric(df_imu.loc[m_b]) if m_b.any() else None
+            if numeric_baseline:
                 last_numeric_baseline = numeric_baseline
             else:
                 numeric_baseline = last_numeric_baseline if (reuse_last_baseline and last_numeric_baseline is not None) else global_numeric_baseline
         else:
             numeric_baseline = last_numeric_baseline if (reuse_last_baseline and last_numeric_baseline is not None) else global_numeric_baseline
 
-        # apply numeric to the entire epoch
+        # apply numeric deltas to the entire epoch
         m_seg = (t >= seg_start) & (t < seg_end)
         if m_seg.any() and delta_cols:
             for c in delta_cols:
@@ -915,40 +935,35 @@ def calculate_deltas(
 
         # ----- quaternion baseline & relative for this epoch -----
         if has_quat:
-            # compute q_base for this epoch from upright-only window
             q_base_epoch = None
-            if bw is not None and m_b.any():
-                Qb = df_imu.loc[m_b, quat_cols].to_numpy(dtype=float)
-                q_base_epoch = _q_mean(Qb)
-                if q_base_epoch is not None:
-                    last_q_base = q_base_epoch
+            if bw is not None:
+                m_b = (t >= b_start) & (t < b_end)
+                if m_b.any():
+                    Qb = df_imu.loc[m_b, quat_cols].to_numpy(dtype=float)
+                    q_base_epoch = _q_mean(Qb)
+                    if q_base_epoch is not None:
+                        last_q_base = q_base_epoch
             if q_base_epoch is None:
-                # reuse last or global
                 q_base_epoch = last_q_base if (reuse_last_baseline and last_q_base is not None) else q_base_global
 
             if q_base_epoch is not None and m_seg.any():
-                idx = np.where(m_seg)[0]
                 Qseg = df_imu.loc[m_seg, quat_cols].to_numpy(dtype=float)
                 valid = ~np.isnan(Qseg).any(axis=1)
                 if np.any(valid):
                     Qn = _q_normalize(Qseg[valid])
                     q_base_conj = _q_conj(_q_normalize(q_base_epoch))
                     Qrel = _q_mul(Qn, q_base_conj)
-
-                    # sign continuity inside the epoch
                     Qrel = _ensure_continuity(Qrel)
 
                     # align epoch start to previous block for cross-block continuity
-                    if last_rel_tail is not None and Qrel.shape[0] > 0:
+                    if 'last_rel_tail' in locals() and last_rel_tail is not None and Qrel.shape[0] > 0:
                         if np.dot(Qrel[0], last_rel_tail) < 0:
                             Qrel *= -1.0
 
                     # write back
                     for j, name in enumerate(rel_cols):
-                        df_delta.loc[m_seg, name] = df_delta.loc[m_seg, name].astype(float)  # ensure dtype
-                        df_delta.loc[m_seg, name] = df_delta.loc[m_seg, name].to_numpy()  # no-op, dtype guard
-                        arr = df_delta.loc[m_seg, name].to_numpy()
-                        arr[:] = np.nan  # reset slice
+                        arr = df_delta.loc[m_seg, name].to_numpy(dtype=float)
+                        arr[:] = np.nan
                         arr[valid] = Qrel[:, j]
                         df_delta.loc[m_seg, name] = arr
 
@@ -971,22 +986,18 @@ def calculate_deltas(
                     df_delta.loc[m_gap, c] = df_delta.loc[m_gap, c] - b
             # quaternion
             if has_quat and q_base_global is not None:
-                idx = np.where(m_gap)[0]
                 Qgap = df_imu.loc[m_gap, quat_cols].to_numpy(dtype=float)
                 valid = ~np.isnan(Qgap).any(axis=1)
                 if np.any(valid):
                     Qn = _q_normalize(Qgap[valid])
                     Qrel = _q_mul(Qn, _q_conj(_q_normalize(q_base_global)))
                     Qrel = _ensure_continuity(Qrel)
-                    # align gap start with previous tail
                     if 'last_rel_tail' in locals() and last_rel_tail is not None and Qrel.shape[0] > 0:
                         if np.dot(Qrel[0], last_rel_tail) < 0:
                             Qrel *= -1.0
                     rel_cols = ["quat_rel_x", "quat_rel_y", "quat_rel_z", "quat_rel_w"]
                     for j, name in enumerate(rel_cols):
-                        df_delta.loc[m_gap, name] = df_delta.loc[m_gap, name].astype(float) if name in df_delta.columns else np.nan
-                        # assign
-                        col = df_delta.loc[m_gap, name].to_numpy() if name in df_delta.columns else np.full(np.sum(m_gap), np.nan)
+                        col = df_delta.loc[m_gap, name].to_numpy(dtype=float)
                         col[:] = np.nan
                         col[valid] = Qrel[:, j]
                         df_delta.loc[m_gap, name] = col
@@ -1000,19 +1011,21 @@ def calculate_deltas(
         df_delta["epoch_id"] = epoch_ids
 
     if verbose:
-        print(f"Δ-baseline: {baseline_method} / per_upright_epoch "
-              f"(epochs_applied={epochs_applied}, windows={len(windows)}). "
+        kept = len(protected)
+        print(f"Δ-baseline: {baseline_method} / per_pre_movement_upright "
+              f"(epochs_applied={epochs_applied}, trimmed_windows={len(windows_trimmed)}). "
               f"Gaps->global={apply_global_to_gaps}. "
-              f"Transformed {len(delta_cols)} numeric channels; "
+              f"Transformed {len(delta_cols)} numeric channels; kept {kept} raw "
+              f"({', '.join(sorted(protected)) if kept else '—'}). "
               f"Quat_rel={'yes' if has_quat else 'no'}. Time='{timestamp_col}'.")
 
-    return df_delta, global_numeric_baseline, windows
+    return df_delta, global_numeric_baseline, windows_trimmed
 
 def compute_and_save_delta_once(
     df_imu: pd.DataFrame,
     *,
     csv_path: str,
-    baseline_method: str = "mean",
+    baseline_method: str = "median",
     min_window_seconds: float = 1.0,
     verbose: bool = False,
 ) -> Tuple[str, bool]:
@@ -1053,7 +1066,117 @@ def compute_and_save_delta_once(
             print(f"⏭️  Delta appeared concurrently; skipping: {out_csv}")
         return out_csv, False
 
-############################
+##### SIGMA CALCULATION ###
+def make_delta_scaled_csv_path(csv_path: str) -> str:
+    """
+    Return the canonical scaled-delta path for a motion CSV.
+    Ensures EXACTLY 'ds' after the second underscore.
+
+      airpods_motion_1760.csv    -> airpods_motion_ds1760.csv
+      airpods_motion_d1760.csv   -> airpods_motion_ds1760.csv
+      airpods_motion_ds1760.csv  -> airpods_motion_ds1760.csv
+      airpods_motion_dds1760.csv -> airpods_motion_ds1760.csv
+
+    For other filenames, appends a single '_ds' before the extension (idempotent).
+    """
+    folder, fname = os.path.split(csv_path)
+    parts = fname.split("_", 2)  # ["airpods","motion","1760.csv"] etc.
+    if len(parts) >= 3:
+        tail = parts[2]
+        # Strip any leading 'd'/'s' run, then re-add 'ds'
+        tail = re.sub(r"^[ds]+", "", tail, flags=re.IGNORECASE)
+        new_fname = f"{parts[0]}_{parts[1]}_ds{tail}"
+    else:
+        base, ext = os.path.splitext(fname)
+        base = re.sub(r"_ds+$", "", base, flags=re.IGNORECASE)
+        new_fname = f"{base}_ds{ext or '.csv'}"
+    return os.path.join(folder, new_fname)
+
+def compute_and_save_delta_scaled_once(
+    *,
+    csv_path: str,
+    channels: Optional[List[str]] = None,
+    sigma_method: str = "std",   # currently only "std" implemented
+    ddof: int = 0,               # population std by default
+    verbose: bool = False,
+) -> Tuple[str, bool, Dict[str, float]]:
+    """
+    Read the delta CSV for this raw csv_path, compute per-column sigma for selected channels,
+    divide those columns by sigma, and save as airpods_motion_ds*.csv.
+
+    Returns: (out_ds_csv_path, created_bool, sigma_dict)
+    """
+    import numpy as np
+
+    # Source = delta file; Target = ds file
+    delta_csv = make_delta_csv_path(csv_path)
+    out_csv   = make_delta_scaled_csv_path(csv_path)
+
+    if not os.path.exists(delta_csv):
+        if verbose:
+            print(f"⚠️  No delta file found; expected at: {delta_csv}")
+        return out_csv, False, {}
+
+    # Idempotent create: if ds already exists, leave it
+    if os.path.exists(out_csv):
+        if verbose:
+            print(f"⏭️  Scaled-delta exists; leaving as-is: {out_csv}")
+        return out_csv, False, {}
+
+    try:
+        df = pd.read_csv(delta_csv, low_memory=False)
+    except Exception as e:
+        if verbose:
+            print(f"❌ Failed to read delta CSV: {delta_csv}\n   ↳ {e}")
+        return out_csv, False, {}
+
+    # Determine which columns to scale
+    # Default: only these channels if present -> acc_*, rot_*, grav_* (or gravity_*)
+    if channels is None:
+        wanted = [
+            "acc_x", "acc_y", "acc_z",
+            "rot_x", "rot_y", "rot_z",
+            "grav_x", "grav_y", "grav_z",
+            "gravity_x", "gravity_y", "gravity_z",
+        ]
+        # keep only those that actually exist in df
+        channels = [c for c in wanted if c in df.columns]
+
+    # Explicitly exclude any quaternion columns even if provided
+    exclude_prefixes = ("quat_", "quatrel_", "quat_rel_")
+    channels = [c for c in channels
+                if not any(c.lower().startswith(p) for p in exclude_prefixes)]
+
+    # Compute sigmas and scale
+    sigmas: Dict[str, float] = {}
+    eps = 1e-12
+    for c in channels:
+        s = pd.to_numeric(df[c], errors="coerce").to_numpy(dtype=float)
+        if sigma_method == "std":
+            sigma = float(np.nanstd(s, ddof=ddof))
+        else:
+            # Future hook for MAD/IQR if needed
+            sigma = float(np.nanstd(s, ddof=ddof))
+        if not np.isfinite(sigma) or sigma < eps:
+            # Avoid division by ~0; leave column unchanged
+            sigma = 1.0
+        df[c] = s / sigma
+        sigmas[c] = sigma
+
+    # Write the scaled csv atomically (race-safe exclusive create)
+    try:
+        with open(out_csv, "x", newline="") as fh:
+            df.to_csv(fh, index=False)
+        if verbose:
+            sc = ", ".join(f"{k}={v:.4g}" for k, v in sigmas.items())
+            print(f"✅ Wrote scaled-delta: {out_csv}\n   σ: {sc}")
+        return out_csv, True, sigmas
+    except FileExistsError:
+        if verbose:
+            print(f"⏭️  Scaled-delta appeared concurrently; skipping: {out_csv}")
+        return out_csv, False, sigmas
+
+#########################
 
 def edit_csv():
     """
@@ -1101,12 +1224,36 @@ def edit_csv():
                 compute_and_save_delta_once(
                     df_imu,
                     csv_path=csv_path,
-                    baseline_method="mean",
+                    baseline_method="median",
                     min_window_seconds=1.0,
                     verbose=False,
                 )
             except Exception as e:
                 print(f"⚠️ Delta conversion skipped for: {csv_path}\n   ↳ {e}")
+
+            try:
+                out_delta, _ = compute_and_save_delta_once(
+                    df_imu,
+                    csv_path=csv_path,
+                    baseline_method="median",   # or "mean" as you like
+                    min_window_seconds=1.0,
+                    verbose=False,
+                )
+            except Exception as e:
+                print(f"⚠️ Delta conversion skipped for: {csv_path}\n   ↳ {e}")
+                continue
+
+            ### NEW FILE WITH SCALED-DELTA (per-file σ) ###
+            try:
+                compute_and_save_delta_scaled_once(
+                    csv_path=csv_path,
+                    # channels=None -> defaults to acc/rot/grav only, skips quats
+                    sigma_method="std",
+                    ddof=0,
+                    verbose=False,
+                )
+            except Exception as e:
+                print(f"⚠️ Scaled-delta skipped for: {csv_path}\n   ↳ {e}")
 
 def individual_accuracy(model, X_test, y_test, classes=(0, 1, 2)):
     """
@@ -1553,7 +1700,7 @@ def X_and_y(type, list_comb, label_anchor: str = "end"):
         # use the new inferred files (single canonical one per session)
         event_files = glob.glob(os.path.join(folder_path, 'events_inferred_*.csv'))
         # allow both d* and non-d* IMU filenames
-        imu_files   = glob.glob(os.path.join(folder_path, 'airpods_motion_d*.csv'))
+        imu_files   = glob.glob(os.path.join(folder_path, 'airpods_motion_ds*.csv'))
         if not event_files or not imu_files:
             print(f"⚠️ Missing files in {folder_path}")
             continue

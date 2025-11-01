@@ -236,7 +236,7 @@ def synthesize_events_from_schedule(imu_csv: str, schedule_csv: str, out_csv: st
     if "t_sec" not in sch.columns:
         raise RuntimeError("Schedule missing t_sec column.")
 
-    # NEW: apply user-provided offset (subtract seconds from every schedule row)
+    # Apply user-provided offset (subtract seconds from every schedule row)
     if offset_s != 0.0:
         sch = sch.copy()
         sch["t_sec"] = pd.to_numeric(sch["t_sec"], errors="coerce") - float(offset_s)
@@ -270,8 +270,11 @@ def synthesize_events_from_schedule(imu_csv: str, schedule_csv: str, out_csv: st
     def hold_event_for(mv: str) -> str:
         return "SLOUCHED_HOLD_START" if mv in SLOUCH_MOVES else "NOSLOUCHED_HOLD_START"
 
-    for _, r in beeps.iterrows():
+    EPS = 1e-6  # minimal separation to enforce ONSET <= HOLD
+
+    for idx, r in beeps.iterrows():
         ev = str(r["event"]); mv = str(r["mv"]); t_beep = float(r["t_sec"])
+
         if ev == "BEEP_SLOUCH":
             onset_event = start_event_for(mv)
             hold_event  = hold_event_for(mv)
@@ -281,6 +284,14 @@ def synthesize_events_from_schedule(imu_csv: str, schedule_csv: str, out_csv: st
 
         onset_time = t_beep - pre_s
         hold_time  = t_beep + post_s
+
+        # Ensure temporal order even when pre < 0 (or extreme combos)
+        if hold_time < onset_time:
+            if verbose:
+                print(f"[note] Clamped HOLD after ONSET at beep {idx}: "
+                      f"pre={pre_s:.3f}, post={post_s:.3f}, "
+                      f"t_onset={onset_time:.3f}, t_hold(old)={hold_time:.3f}")
+            hold_time = onset_time + EPS
 
         out_rows.append([onset_time, onset_event, f"type={mv}"])
         out_rows.append([hold_time,  hold_event,  f"type={mv}"])

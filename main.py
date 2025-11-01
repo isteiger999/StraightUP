@@ -54,7 +54,7 @@ def main():
     std_mean(mean, std) 
 
     # print Confusion matrix (0 = upright, 1 = transition, 2 = slouch) #
-    png_recall = cm_avg.save_figure(model_tag="tcn", normalize="true")  # recall view (for precision use normalize="pred")
+    png_recall = cm_avg.save_figure(model_tag="cnn", normalize="true")  # recall view (for precision use normalize="pred")
     print("✅ Saved averaged confusion matrix")
     
 

@@ -64,6 +64,50 @@ def delete_airpods_motion_d_csvs(root: str = "data", dry_run: bool = True):
     for p in deleted:
         print(" -", p)
     return deleted
+
+def delete_airpods_motion_ds_csvs(root: str = "data", dry_run: bool = True):
+    """
+    Delete ONLY files matching:
+        data/beep_schedules_*/airpods_motion_ds<digits>.csv
+
+    Safety:
+      - Uses a strict regex (airpods_motion_ds\\d+\\.csv).
+      - Set dry_run=False to actually delete.
+
+    Returns a list of file paths (matched; deleted if dry_run=False).
+    """
+    pattern = os.path.join(root, "beep_schedules_*", "airpods_motion_ds*.csv")
+    files = sorted(glob.glob(pattern))
+    rx = re.compile(r"^airpods_motion_ds\d+\.csv\Z")
+
+    matched = []
+    for p in files:
+        name = os.path.basename(p)
+        if rx.fullmatch(name) and os.path.isfile(p):
+            matched.append(p)
+
+    if not matched:
+        print("No matching files found.")
+        return []
+
+    if dry_run:
+        print(f"[DRY RUN] Would delete {len(matched)} file(s):")
+        for p in matched:
+            print(" -", p)
+        return matched
+
+    deleted = []
+    for p in matched:
+        try:
+            os.remove(p)
+            deleted.append(p)
+        except Exception as e:
+            print(f"Failed to delete {p}: {e}")
+
+    print(f"Deleted {len(deleted)} file(s).")
+    for p in deleted:
+        print(" -", p)
+    return deleted
 # -------------------
 
 # ---------------- Filtering ----------------
@@ -308,21 +352,23 @@ def plot_reconstructed_signal_slider(
 
 def main():
     
-    X_train, y_train = X_and_y("train", ['David', 'Ivan', 'Claire', 'Mohid', 'Dario'],
+    X_train, y_train = X_and_y("train", ['David', 'Ivan', 'Claire', 'Mohid', 'Dario', 'Svetlana', 'Mohid', 'Dario'],
                                label_anchor='center') #['Ivan', 'Dario', 'David', 'Claire', 'Mohid']
     #plot_label_verlauf(y_train, length=700)
 
     plot_reconstructed_signal_slider(
         X_train, y_train,
         windows=75,
-        chanel=[0, 7, 11, 12], #4
+        chanel=[7, 11, 12], #4
         view_windows=100,
         start_window=0
     )
     
     ##
     # Delete delta files:
-    # delete_airpods_motion_d_csvs("data", dry_run=False)  # actually delete
+    #delete_airpods_motion_d_csvs("data", dry_run=False)  # actually delete
+    #delete_airpods_motion_ds_csvs("data", dry_run=False)
+    
     '''
     df = pd.read_csv(r"data/beep_schedules_Claire0/airpods_motion_d1760629578.csv")
     duration = 1600

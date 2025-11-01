@@ -91,14 +91,21 @@ def quick_is_valid_imu(path: Path) -> bool:
 
 def list_imus(root: Path, pattern: str="airpods_motion_*.csv") -> List[Path]:
     files = sorted(root.rglob(pattern))
+    rx_raw = re.compile(r"^airpods_motion_\d+\.csv\Z")  # keep only raw (digits-only) stems
+    files = [p for p in files if rx_raw.fullmatch(p.name)]
     return [p for p in files if p.is_file() and quick_is_valid_imu(p)]
 
 def _name_core(stem: str, prefix: str) -> str:
     return stem[len(prefix):] if stem.startswith(prefix) else stem
 
 def normalize_core(core: str) -> str:
-    """Strip leading 'd' characters from a stem; e.g., 'd1760...' -> '1760...'."""
-    return re.sub(r'^d+', '', core)
+    """
+    Normalize IMU stem to a numeric session id (e.g. '1760').
+    Handles raw, d-prefixed, ds-prefixed names: '1760','d1760','ds1760','dd1760', etc.
+    """
+    m = re.search(r'(\d+)$', core)
+    # Prefer trailing digits; fallback: strip leading d/s run
+    return m.group(1) if m else re.sub(r'^[ds]+', '', core, flags=re.IGNORECASE)
 
 def _schedule_match_score(imu_path: Path, sch_path: Path) -> Tuple[int, int, float]:
     """
@@ -123,21 +130,23 @@ def find_schedule_for_imu(imu_path: Path, all_schedules: List[Path]) -> Optional
     return scored[0]
 
 def cleanup_variant_event_files(folder: Path, session: str) -> None:
-    patterns = [
-        f"events_inferred_d{session}.csv",
-        f"events_debug_d{session}.csv",
-    ]
-    for prefix in ["events_inferred_", "events_debug_"]:
-        for k in range(2, 6):  # dd..dddd
-            patterns.append(f"{prefix}{'d'*k}{session}.csv")
-    for pat in patterns:
-        p = folder / pat
-        if p.exists():
-            try:
+    """
+    Remove stray variants like:
+      events_inferred_d{session}.csv, events_debug_s{session}.csv,
+      events_inferred_dd{session}.csv, events_debug_ds{session}.csv, etc.
+    We keep the canonical files: events_inferred_{session}.csv and events_debug_{session}.csv.
+    """
+    rx = re.compile(
+        rf"^(events_inferred|events_debug)_[ds]+{re.escape(session)}\.csv$",
+        re.IGNORECASE
+    )
+    for p in folder.glob("events_*_*.csv"):
+        try:
+            if rx.fullmatch(p.name):
                 p.unlink()
                 print(f"[clean] removed stray {p.name}")
-            except Exception as e:
-                print(f"[warn] could not remove {p.name}: {e}", file=sys.stderr)
+        except Exception as e:
+            print(f"[warn] could not remove {p.name}: {e}", file=sys.stderr)
 
 # ---------- alignment helpers ----------
 def align_schedule_times(sch: pd.DataFrame, t0: float, t1: float, verbose: bool=False) -> Tuple[pd.DataFrame, float, str]:

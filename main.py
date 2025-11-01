@@ -20,7 +20,7 @@ def main():
     print(combinations)
     
     edit_csv()
-    
+    '''
     cm_avg = ConfusionMatrixAverager(
         # optional, but nice, since your labels are known
         class_names=["upright", "transition", "slouch"],
@@ -56,7 +56,7 @@ def main():
     # print Confusion matrix (0 = upright, 1 = transition, 2 = slouch) #
     png_recall = cm_avg.save_figure(model_tag="cnn", normalize="true")  # recall view (for precision use normalize="pred")
     print("✅ Saved averaged confusion matrix")
-    
+    ''' 
 
 if __name__ == '__main__':
     main() 

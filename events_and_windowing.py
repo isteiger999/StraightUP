@@ -17,6 +17,14 @@ import re
 
 
 # count number of beep_schedules_folders:
+def _natural_key(path_or_name: str):
+    """
+    Split digits so names like 'beep_schedules_Claire10' sort after '...Claire2'.
+    Works with full paths or basenames.
+    """
+    name = os.path.basename(os.fspath(path_or_name)).lower()
+    return [int(s) if s.isdigit() else s for s in re.split(r'(\d+)', name)]
+
 def folders_tot(type, list_comb):
     if type == 'train':
         endings = tuple(list_comb[:-2])  # All except last two
@@ -39,7 +47,7 @@ def folders_tot(type, list_comb):
         pattern = os.path.join(DATA_ROOT, f'beep_schedules_{ending}*')
         
         # Find all paths matching the specific pattern
-        current_matches = glob.glob(pattern)
+        current_matches = sorted(glob.glob(pattern), key=_natural_key)
         
         # Filter to ensure the match is actually a directory (folder)
         folder_paths = [path for path in current_matches if os.path.isdir(path)]
@@ -1698,9 +1706,9 @@ def X_and_y(type, list_comb, label_anchor: str = "end"):
             continue
 
         # use the new inferred files (single canonical one per session)
-        event_files = glob.glob(os.path.join(folder_path, 'events_inferred_*.csv'))
+        event_files = sorted(glob.glob(os.path.join(folder_path, 'events_inferred_*.csv')), key=_natural_key)
         # allow both d* and non-d* IMU filenames
-        imu_files   = glob.glob(os.path.join(folder_path, 'airpods_motion_ds*.csv'))
+        imu_files   = sorted(glob.glob(os.path.join(folder_path, 'airpods_motion_ds*.csv')), key=_natural_key)
         if not event_files or not imu_files:
             print(f"⚠️ Missing files in {folder_path}")
             continue

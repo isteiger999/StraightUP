@@ -14,13 +14,13 @@ warnings.filterwarnings("ignore", category=NotOpenSSLWarning)
 
 def main():
 
-    participants = ['Ivan', 'Dario', 'David', 'Claire', 'Mohid']         # 'Ivaan', 'Svetlana'
+    participants = ['Ivan', 'Dario', 'David', 'Claire', 'Mohid', 'Svetlana', 'Abi']         # 'Ivaan', 'Svetlana'
     combinations, mean, std = find_combinations(participants, fraction = 0.5)  # fraction 0.1 means cut off  
     n = len(combinations)
     print(combinations)
     
     edit_csv()
-    '''
+    
     cm_avg = ConfusionMatrixAverager(
         # optional, but nice, since your labels are known
         class_names=["upright", "transition", "slouch"],
@@ -56,7 +56,7 @@ def main():
     # print Confusion matrix (0 = upright, 1 = transition, 2 = slouch) #
     png_recall = cm_avg.save_figure(model_tag="cnn", normalize="true")  # recall view (for precision use normalize="pred")
     print("✅ Saved averaged confusion matrix")
-    ''' 
+    
 
 if __name__ == '__main__':
     main() 

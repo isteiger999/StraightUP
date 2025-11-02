@@ -352,7 +352,7 @@ def plot_reconstructed_signal_slider(
 
 def main():
     
-    X_train, y_train = X_and_y("train", ['David', 'Ivan', 'Claire', 'Mohid', 'Dario', 'Svetlana', 'Mohid', 'Dario'],
+    X_train, y_train = X_and_y("train", ['Abi', 'David', 'Ivan', 'Claire', 'Mohid', 'Dario', 'Svetlana'],
                                label_anchor='center') #['Ivan', 'Dario', 'David', 'Claire', 'Mohid']
     #plot_label_verlauf(y_train, length=700)
 

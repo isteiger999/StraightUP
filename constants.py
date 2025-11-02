@@ -57,7 +57,7 @@ def configure_tensorflow():
 
 
 ''' (jitter is probabilistic)
-python generate_beep_schedule_5m15s.py --participant Test0 \
+python generate_beep_schedule_5m15s.py --participant Abi3 \
   --minutes 5 --cycle-len 15 --jitter 1.0 --initial-delay 2.0 --make-wav \
   --movements "normal_slouch,fast_slouch,micro_slouch,lateral_left,lateral_right,neck_only,reach_left,reach_right" \
   --complete-plan
@@ -66,7 +66,7 @@ python generate_beep_schedule_5m15s.py --participant Test0 \
 '''
 Windows laptop:
 python generate_beep_schedule_5m15s.py `
-  --participant Dario3 `
+  --participant Abi1 `
   --minutes 5 `
   --cycle-len 15 `
   --jitter 1.0 `
@@ -85,9 +85,9 @@ python batch_infer_events.py --verbose --pre 0.05 --post 0.9 --offset 2.0
 '''
 # Single Person
 python batch_infer_events.py \
-  --root data/beep_schedules_Svetlana2 \
+  --root data/beep_schedules_Abi3 \
   --glob "airpods_motion_*.csv" \
-  --verbose --pre 0.05 --post 0.90 --offset 1.75
+  --verbose --pre 0.05 --post 0.90 --offset 2.0
 '''
 
 '''

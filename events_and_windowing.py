@@ -1665,6 +1665,65 @@ def find_shapes():
 
     return t, dt_med, fs, win_len_frames, stride_frames, N, windows_per_rec, stride, len_window_sec
 
+def remove_edge_windows(X, y, drop_labels=(0, 2)):
+    """
+    Remove the first and last sample of every consecutive run whose label is in `drop_labels`.
+    By default this trims runs of 0 (upright) and 2 (slouch) and leaves runs of 1 (transition) intact.
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Feature tensor (N, ...). Only the first dimension is used for indexing.
+    y : np.ndarray
+        Labels of shape (N,) or (N, 1) with values in {0,1,2}.
+    drop_labels : tuple[int], optional
+        Labels whose run edges should be removed (default: (0, 2)).
+
+    Returns
+    -------
+    X_out : np.ndarray
+        X with trimmed windows removed.
+    y_out : np.ndarray
+        y with the same windows removed. Keeps column shape (M, 1) if input was (N, 1).
+
+    Notes
+    -----
+    - If a run has length 1, removing "first and last" removes that single sample.
+    - If a run has length 2, both samples are removed.
+    """
+    X = np.asarray(X)
+    y_arr = np.asarray(y)
+
+    # Keep track if y was a column vector to preserve shape on return
+    y_was_col = (y_arr.ndim == 2 and y_arr.shape[1] == 1)
+    y1d = y_arr.reshape(-1)
+
+    if X.shape[0] != y1d.size:
+        raise ValueError(f"X and y must have the same number of windows (got {X.shape[0]} vs {y1d.size}).")
+
+    n = y1d.size
+    if n == 0:
+        return X, y
+
+    # Identify run starts/ends
+    changes = np.flatnonzero(np.diff(y1d) != 0)
+    starts = np.r_[0, changes + 1]
+    ends   = np.r_[changes, n - 1]
+
+    # Decide which runs to trim (those whose label is in drop_labels)
+    run_labels = y1d[starts]
+    to_trim = np.isin(run_labels, drop_labels)
+
+    # Build keep mask and drop first/last of the selected runs
+    mask = np.ones(n, dtype=bool)
+    mask[starts[to_trim]] = False
+    mask[ends[to_trim]]   = False
+
+    X_out = X[mask]
+    y_out = y_arr[mask, :] if y_was_col else y_arr[mask]
+
+    return X_out, y_out
+
 # -----------------------------
 
 def X_and_y(type, list_comb, label_anchor: str = "end"):
@@ -1778,4 +1837,5 @@ def X_and_y(type, list_comb, label_anchor: str = "end"):
 
             X_tot[base + i, :, :] = win
 
-    return X_tot, y_tot
+    #return X_tot, y_tot
+    return remove_edge_windows(X_tot, y_tot)

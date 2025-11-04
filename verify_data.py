@@ -142,8 +142,8 @@ def detect_fs(df):
 def calculate_std(matching_folders):
     """
     Compute per-channel standard deviations from airpods_motion_d*.csv (NOT ds files),
-    and aggregate them per participant and overall. In addition to the average std,
-    this returns the *standard deviation of the standard deviations* (std-of-std).
+    aggregate them per participant and overall, and DISPLAY a plot of participants'
+    average std per channel (excluding the 4 relative quaternions).
 
     Parameters
     ----------
@@ -190,13 +190,15 @@ def calculate_std(matching_folders):
     * The timestamp column is excluded automatically (common names: t_sec, timestamp, time, ...).
     * Only numeric columns are considered (non-numeric coerced to NaN and ignored).
     * All std computations use population std (ddof=0) and ignore NaNs.
-    * Participants/channels aggregate over whatever data exists (no hard requirement for 4 sessions).
+    * The plot pops up (plt.show()) and is NOT saved. The 4 relative quaternion channels
+      ('quat_rel_x','quat_rel_y','quat_rel_z','quat_rel_w') are excluded from the plot.
     """
     import os
     import re
     import glob
     import numpy as np
     import pandas as pd
+    import matplotlib.pyplot as plt
     from collections import defaultdict
 
     # ---- configuration ----
@@ -363,12 +365,53 @@ def calculate_std(matching_folders):
         if arr.size == 0:
             continue
         overall_avg_std[ch] = {
-            "mean_std": float(np.nanmean(arr)),        # mean across participants of participant mean_std
+            "mean_std": float(np.nanmean(arr)),           # mean across participants of participant mean_std
             "std_of_std": float(np.nanstd(arr, ddof=0)),  # std across participants of participant mean_std
             "n_participants": int(arr.size),
         }
 
-    # sort for deterministic output
+    # ---- plotting: participants' average std per channel (exclude quat_rel_*) ----
+    # collect union of channels, then filter out the 4 relative quaternions
+    rel_quat_set = {"quat_rel_x", "quat_rel_y", "quat_rel_z", "quat_rel_w"}
+    channels = set()
+    for _pname, ch_dict in per_participant_avg_std.items():
+        channels.update(ch_dict.keys())
+    channels_to_plot = [c for c in sorted(channels, key=lambda s: s.lower())
+                        if c.lower() not in rel_quat_set]
+
+    if channels_to_plot and per_participant_avg_std:
+        participants_order = sorted(per_participant_avg_std.keys(), key=lambda s: s.lower())
+        x = np.arange(len(channels_to_plot))
+
+        fig = plt.figure(figsize=(max(8.0, 0.7 * len(channels_to_plot)), 6.0))
+        ax = plt.gca()
+
+        nP = len(participants_order)
+        # small horizontal jitter so points from different participants don't fully overlap
+        jitter = 0.8 / max(nP, 1)
+
+        for i, pname in enumerate(participants_order):
+            y_vals = []
+            x_idx = []
+            for j, ch in enumerate(channels_to_plot):
+                v = per_participant_avg_std[pname].get(ch, {}).get("mean_std", np.nan)
+                if np.isfinite(v):
+                    y_vals.append(v)
+                    x_idx.append(x[j] + (i - (nP - 1) / 2.0) * jitter)
+            if y_vals:
+                ax.scatter(x_idx, y_vals, label=pname, alpha=0.9, s=28)
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(channels_to_plot, rotation=45, ha="right")
+        ax.set_ylabel("Average std (per participant)")
+        ax.set_title("Per-participant average std by channel (from airpods_motion_d*.csv)")
+        ax.grid(True, axis="y", linestyle="--", linewidth=0.6, alpha=0.6)
+        if len(participants_order) <= 12:
+            ax.legend(title="Participant", fontsize=9)
+        fig.tight_layout()
+        plt.show()
+
+    # ---- sort for deterministic returned dicts ----
     def _sort_nested(d):
         return {k: d[k] for k in sorted(d.keys(), key=lambda x: str(x).lower())}
 
@@ -377,7 +420,6 @@ def calculate_std(matching_folders):
     overall_avg_std = _sort_nested(overall_avg_std)
 
     return per_file_std, per_participant_avg_std, overall_avg_std
-
 
 # ---------------- FOR PLOTTING TO CHECK DELTAS ----------------
 

@@ -139,6 +139,246 @@ def detect_fs(df):
             return float(1.0 / np.median(dt))
     return 50.0
 
+def calculate_std(matching_folders):
+    """
+    Compute per-channel standard deviations from airpods_motion_d*.csv (NOT ds files),
+    and aggregate them per participant and overall. In addition to the average std,
+    this returns the *standard deviation of the standard deviations* (std-of-std).
+
+    Parameters
+    ----------
+    matching_folders : list[str]
+        A list of participant base names (e.g., ["Abi", "Ben"]) OR explicit session folder
+        paths (e.g., ["data/beep_schedules_Abi0", ...]). For each name, all matching
+        session folders (e.g., Abi0..Abi3) are collected under ./data/beep_schedules_*.
+
+    Returns
+    -------
+    per_file_std : dict
+        { participant_display_name :
+            { session_folder_basename : { channel : std, ... }, ... },
+          ...
+        }
+
+    per_participant_avg_std : dict
+        For each participant and channel, includes BOTH the average std (across that
+        participant’s sessions) and the std-of-std across that participant’s sessions.
+        {
+          participant_display_name : {
+              channel : {
+                  "mean_std" : float,       # mean of per-session stds for this participant
+                  "std_of_std" : float,     # std (population, ddof=0) of those per-session stds
+                  "n_sessions" : int
+              }, ...
+          }, ...
+        }
+
+    overall_avg_std : dict
+        For each channel, includes BOTH the overall mean std across participants and the
+        std-of-std *across participants* (computed over the per-participant mean_std values).
+        {
+          channel : {
+              "mean_std" : float,          # mean across participants of each participant's mean_std
+              "std_of_std" : float,        # std across participants of each participant's mean_std
+              "n_participants" : int
+          }, ...
+        }
+
+    Notes
+    -----
+    * Only files matching airpods_motion_d[0-9]*.csv are used (explicitly excludes ds files).
+    * The timestamp column is excluded automatically (common names: t_sec, timestamp, time, ...).
+    * Only numeric columns are considered (non-numeric coerced to NaN and ignored).
+    * All std computations use population std (ddof=0) and ignore NaNs.
+    * Participants/channels aggregate over whatever data exists (no hard requirement for 4 sessions).
+    """
+    import os
+    import re
+    import glob
+    import numpy as np
+    import pandas as pd
+    from collections import defaultdict
+
+    # ---- configuration ----
+    DATA_ROOT = os.path.join(os.getcwd(), "data")
+    BEEP_GLOB = os.path.join(DATA_ROOT, "beep_schedules_*")  # where sessions live
+
+    # ---- helpers ----
+    def _natural_key(path_or_name: str):
+        """Split digits so names like 'Claire10' sort after 'Claire2'."""
+        name = os.path.basename(os.fspath(path_or_name)).lower()
+        return [int(s) if s.isdigit() else s for s in re.split(r'(\d+)', name)]
+
+    def _detect_time_col(df, candidates=("t_sec", "timestamp", "time", "time_sec", "epoch", "epoch_s")):
+        lower = {c.lower(): c for c in df.columns}
+        for c in candidates:
+            if c.lower() in lower:
+                return lower[c.lower()]
+        return df.columns[0]  # fallback to first column
+
+    def _participant_key_from_basename(basename: str) -> str:
+        """
+        Extract a stable participant key from a session folder name like 'beep_schedules_Abi0' -> 'abi'.
+        """
+        b = os.path.basename(basename)
+        b = re.sub(r'^(beep_schedules[_\-]*)', '', b, flags=re.IGNORECASE)
+        b = re.sub(r'[_\-]+$', '', b)
+        b = re.sub(r'[_\-]?[0-9]{1,2}$', '', b)     # strip trailing small integer tag
+        b = re.sub(r'^[0-9]{1,2}[_\-]?', '', b)     # strip leading small integer tag if any
+        return b.strip("_- ").lower()
+
+    def _gather_all_session_dirs():
+        return sorted(
+            [p for p in glob.glob(BEEP_GLOB) if os.path.isdir(p)],
+            key=_natural_key
+        )
+
+    def _resolve_sessions_for_name(name_key: str, all_dirs):
+        """
+        Map a participant base name (case-insensitive) to all its session folders.
+        """
+        key = name_key.strip().lower()
+        out = [d for d in all_dirs if _participant_key_from_basename(d) == key]
+        return sorted(out, key=_natural_key)
+
+    # ---- build participant -> [session folders] map (canonicalize while preserving display names) ----
+    all_session_dirs = _gather_all_session_dirs()
+    participants = {}  # canonical_key -> {"display": display_name, "sessions": [dirs...]}
+
+    for entry in matching_folders:
+        if os.path.isdir(entry):
+            base = os.path.basename(os.path.normpath(entry))
+            canon = _participant_key_from_basename(base)
+            sessions = _resolve_sessions_for_name(canon, all_session_dirs)
+            display = re.sub(r'[_\-]+$', '', re.sub(r'^(beep_schedules[_\-]*)', '', base, flags=re.IGNORECASE))
+        else:
+            canon = entry.strip().lower()
+            sessions = _resolve_sessions_for_name(canon, all_session_dirs)
+            display = entry  # keep caller's casing
+
+        if not sessions:
+            continue
+
+        if canon not in participants:
+            participants[canon] = {"display": display, "sessions": []}
+        # dedupe while preserving order
+        seen = set(participants[canon]["sessions"])
+        for s in sessions:
+            if s not in seen:
+                participants[canon]["sessions"].append(s)
+                seen.add(s)
+
+    # Early exit if nothing matched
+    if not participants:
+        return {}, {}, {}
+
+    # ---- compute per-file stds ----
+    per_file_std = {}
+    for canon_key in sorted(participants.keys(), key=lambda k: participants[k]["display"].lower()):
+        display_name = participants[canon_key]["display"]
+        session_dirs = participants[canon_key]["sessions"]
+
+        file_stats_for_participant = {}
+        for sess_dir in session_dirs:
+            # only d[0-9]* csv (exclude ds*)
+            csv_files = sorted(
+                glob.glob(os.path.join(sess_dir, "airpods_motion_d[0-9]*.csv")),
+                key=_natural_key
+            )
+            if not csv_files:
+                continue
+
+            csv_path = csv_files[0]  # take first in natural order
+            try:
+                df = pd.read_csv(csv_path, low_memory=False)
+            except Exception:
+                continue  # skip unreadable
+
+            if df.shape[0] == 0 or df.shape[1] == 0:
+                continue
+
+            time_col = _detect_time_col(df)
+            feat_cols = [c for c in df.columns if c != time_col]
+            if not feat_cols:
+                continue
+
+            # numeric only; errors -> NaN; compute population std ignoring NaN
+            X = df[feat_cols].apply(pd.to_numeric, errors="coerce")
+            valid_cols = [c for c in feat_cols if X[c].notna().any()]
+            if not valid_cols:
+                continue
+
+            stats = {}
+            for c in valid_cols:
+                col = X[c].to_numpy(dtype=float, copy=False)
+                sigma = float(np.nanstd(col, ddof=0))
+                if np.isfinite(sigma):
+                    stats[c] = sigma
+
+            if stats:
+                file_stats_for_participant[os.path.basename(sess_dir)] = dict(
+                    sorted(stats.items(), key=lambda kv: kv[0].lower())
+                )
+
+        if file_stats_for_participant:
+            per_file_std[display_name] = file_stats_for_participant
+
+    # ---- per-participant aggregates: mean_std and std_of_std (across that participant's sessions) ----
+    per_participant_avg_std = {}
+    for disp_name, files_dict in per_file_std.items():
+        # accumulate vectors of session-stds per channel
+        acc = defaultdict(list)
+        for _sess, ch_stats in files_dict.items():
+            for ch, v in ch_stats.items():
+                if np.isfinite(v):
+                    acc[ch].append(float(v))
+        if not acc:
+            continue
+
+        ch_agg = {}
+        for ch, vals in acc.items():
+            arr = np.array(vals, dtype=float)
+            mean_std = float(np.nanmean(arr)) if arr.size else float("nan")
+            std_of_std = float(np.nanstd(arr, ddof=0)) if arr.size else float("nan")
+            ch_agg[ch] = {
+                "mean_std": mean_std,
+                "std_of_std": std_of_std,
+                "n_sessions": int(arr.size),
+            }
+
+        # stable ordering of channels
+        per_participant_avg_std[disp_name] = {k: ch_agg[k] for k in sorted(ch_agg.keys(), key=lambda s: s.lower())}
+
+    # ---- overall aggregates across participants (computed over participant mean_std values) ----
+    channel_to_participant_means = defaultdict(list)
+    for _pname, ch_dict in per_participant_avg_std.items():
+        for ch, d in ch_dict.items():
+            val = d.get("mean_std", np.nan)
+            if np.isfinite(val):
+                channel_to_participant_means[ch].append(float(val))
+
+    overall_avg_std = {}
+    for ch, vals in channel_to_participant_means.items():
+        arr = np.array(vals, dtype=float)
+        if arr.size == 0:
+            continue
+        overall_avg_std[ch] = {
+            "mean_std": float(np.nanmean(arr)),        # mean across participants of participant mean_std
+            "std_of_std": float(np.nanstd(arr, ddof=0)),  # std across participants of participant mean_std
+            "n_participants": int(arr.size),
+        }
+
+    # sort for deterministic output
+    def _sort_nested(d):
+        return {k: d[k] for k in sorted(d.keys(), key=lambda x: str(x).lower())}
+
+    per_file_std = {pk: _sort_nested(per_file_std[pk]) for pk in sorted(per_file_std.keys(), key=lambda x: str(x).lower())}
+    per_participant_avg_std = {pk: _sort_nested(per_participant_avg_std[pk]) for pk in sorted(per_participant_avg_std.keys(), key=lambda x: str(x).lower())}
+    overall_avg_std = _sort_nested(overall_avg_std)
+
+    return per_file_std, per_participant_avg_std, overall_avg_std
+
+
 # ---------------- FOR PLOTTING TO CHECK DELTAS ----------------
 
 def plot_label_verlauf(y_train, length):
@@ -351,15 +591,19 @@ def plot_reconstructed_signal_slider(
     return fig, ax, s_start
 
 def main():
-    
-    X_train, y_train = X_and_y("train", ['Abi', 'David', 'Ivan', 'Claire', 'Mohid', 'Dario', 'Svetlana'],
+    per_file_std, per_participant_avg_std, overall_avg_std = calculate_std(['Abi', 'Ivan', 'Dario', 'Mohid', 'Claire', 'David'])
+    #print(f"Per file std {per_file_std}")
+    #print(f"Per participant std {per_participant_avg_std}")
+    print(f"Overall std {overall_avg_std}")
+    '''
+    X_train, y_train = X_and_y("train", ['Svetlana', 'Claire', 'Dario', 'Mohid', 'Ivan', 'David', 'Abi'],
                                label_anchor='center') #['Ivan', 'Dario', 'David', 'Claire', 'Mohid']
-    #plot_label_verlauf(y_train, length=700)
+    #plot_label_verlauf(y_train, length=2900)
 
     plot_reconstructed_signal_slider(
         X_train, y_train,
         windows=75,
-        chanel=[7, 11, 12], #4
+        chanel=[9], #4
         view_windows=100,
         start_window=0
     )
@@ -368,7 +612,7 @@ def main():
     # Delete delta files:
     #delete_airpods_motion_d_csvs("data", dry_run=False)  # actually delete
     #delete_airpods_motion_ds_csvs("data", dry_run=False)
-    
+    '''
     '''
     df = pd.read_csv(r"data/beep_schedules_Claire0/airpods_motion_d1760629578.csv")
     duration = 1600

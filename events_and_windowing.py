@@ -1724,6 +1724,41 @@ def remove_edge_windows(X, y, drop_labels=(0, 2)):
 
     return X_out, y_out
 
+def drop_quaternion_channels(X_tot: np.ndarray, y_tot: np.ndarray, n_quat: int = 4, copy: bool = False):
+    """
+    Remove the last `n_quat` feature channels from X_tot (the quaternion channels).
+    y_tot is passed through unchanged.
+
+    Parameters
+    ----------
+    X_tot : np.ndarray
+        Shape (N_windows, win_len_frames, n_features)
+    y_tot : np.ndarray
+        Shape (N_windows, 1) or similar. Returned unchanged.
+    n_quat : int, default 4
+        Number of trailing channels to drop.
+    copy : bool, default False
+        If True, returns a copy; otherwise returns a view.
+
+    Returns
+    -------
+    X_noquat : np.ndarray
+        X_tot with the last `n_quat` channels removed.
+    y_tot : np.ndarray
+        Unchanged.
+    """
+    if X_tot is None:
+        return X_tot, y_tot
+    if X_tot.ndim != 3:
+        raise ValueError(f"X_tot must be 3D (N, T, C), got shape {X_tot.shape}")
+    C = X_tot.shape[-1]
+    if C < n_quat:
+        raise ValueError(f"X_tot has only {C} channels; cannot drop {n_quat} quaternion channels.")
+    X_noquat = X_tot[..., :C - n_quat]
+    if copy:
+        X_noquat = X_noquat.copy()
+    return X_noquat, y_tot
+   
 # -----------------------------
 
 def X_and_y(type, list_comb, label_anchor: str = "end"):
@@ -1749,6 +1784,9 @@ def X_and_y(type, list_comb, label_anchor: str = "end"):
     matching_folders, n_folders = folders_tot(type, list_comb)
     _, _, _, win_len_frames, stride_frames, _, windows_per_rec, stride, len_window_sec = find_shapes()
     
+    ## Calculate std from 'train' participants
+    # ...
+
     # seconds offset to add to t0 + i*stride for the label timestamp
     if anchor == "start":
         anchor_offset_sec = 0.0
@@ -1838,4 +1876,5 @@ def X_and_y(type, list_comb, label_anchor: str = "end"):
             X_tot[base + i, :, :] = win
 
     #return X_tot, y_tot
+    X_tot, y_tot = drop_quaternion_channels(X_tot, y_tot)
     return remove_edge_windows(X_tot, y_tot)

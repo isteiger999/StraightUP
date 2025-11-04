@@ -14,7 +14,7 @@ warnings.filterwarnings("ignore", category=NotOpenSSLWarning)
 
 def main():
 
-    participants = ['Ivan', 'Dario', 'David', 'Claire', 'Mohid', 'Svetlana', 'Abi']         # 'Ivaan', 'Svetlana'
+    participants = ['Abi', 'Ivan', 'Dario', 'Mohid', 'Claire', 'David']         # 'Ivaan', 'Svetlana'
     combinations, mean, std = find_combinations(participants, fraction = 0.5)  # fraction 0.1 means cut off  
     n = len(combinations)
     print(combinations)
@@ -35,7 +35,7 @@ def main():
         X_test, y_test = X_and_y("test", list_comb, label_anchor="center")
         
         # 2. Train & Evaluate CNN
-        model, history = CNN_model(X_train, y_train, X_val, y_val, verbose = 1)
+        model, history = CNN_model(X_train, y_train, X_val, y_val, verbose = 0)
         #model, history = train_eval_tcn(X_train, y_train, X_val, y_val, verbose=1)
 
         # 3. Testing the CNN
@@ -57,6 +57,7 @@ def main():
     png_recall = cm_avg.save_figure(model_tag="cnn", normalize="true")  # recall view (for precision use normalize="pred")
     print("✅ Saved averaged confusion matrix")
     
+    export_coreml(X_train, model, out_path="PostureCNN.mlpackage")
 
 if __name__ == '__main__':
     main() 

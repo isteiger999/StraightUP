@@ -196,7 +196,7 @@ def CNN_model(X_train, y_train, X_val, y_val, verbose, n_classes=3):
         layers.MaxPooling1D(2),
 
         layers.Conv1D(64, 5,  padding="causal", activation="relu", kernel_regularizer=l2),
-        layers.MaxPooling1D(2),
+        layers.MaxPooling1D(2), # 64
         
         layers.GlobalAveragePooling1D(),
         layers.Dropout(0.30),

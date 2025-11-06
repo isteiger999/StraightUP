@@ -1758,7 +1758,41 @@ def drop_quaternion_channels(X_tot: np.ndarray, y_tot: np.ndarray, n_quat: int =
     if copy:
         X_noquat = X_noquat.copy()
     return X_noquat, y_tot
-   
+
+def drop_pitch_channel(X_tot: np.ndarray, y_tot: np.ndarray, copy: bool = False):
+    """
+    Remove the last feature channel from X_tot (assumed to be the 'pitch' channel).
+    y_tot is passed through unchanged.
+
+    Parameters
+    ----------
+    X_tot : np.ndarray
+        Shape (N_windows, win_len_frames, n_features)
+    y_tot : np.ndarray
+        Shape (N_windows, 1) or similar. Returned unchanged.
+    copy : bool, default False
+        If True, returns a copy; otherwise returns a view.
+
+    Returns
+    -------
+    X_nopitch : np.ndarray
+        X_tot with the last channel removed.
+    y_tot : np.ndarray
+        Unchanged.
+    """
+    if X_tot is None:
+        return X_tot, y_tot
+    if X_tot.ndim != 3:
+        raise ValueError(f"X_tot must be 3D (N, T, C), got shape {X_tot.shape}")
+
+    C = X_tot.shape[-1]
+    if C < 1:
+        raise ValueError("X_tot has zero channels; cannot drop pitch channel.")
+
+    X_nopitch = X_tot[..., :C - 1]
+    if copy:
+        X_nopitch = X_nopitch.copy()
+    return X_nopitch, y_tot   
 # -----------------------------
 
 def X_and_y(type, list_comb, label_anchor: str = "end"):
@@ -1876,5 +1910,6 @@ def X_and_y(type, list_comb, label_anchor: str = "end"):
             X_tot[base + i, :, :] = win
 
     #return X_tot, y_tot
-    X_tot, y_tot = drop_quaternion_channels(X_tot, y_tot)
+    X_tot, y_tot = drop_quaternion_channels(X_tot, y_tot)  # 14 → 10 chans
+    X_tot, y_tot = drop_pitch_channel(X_tot, y_tot)        # 10 → 9 chans
     return remove_edge_windows(X_tot, y_tot)

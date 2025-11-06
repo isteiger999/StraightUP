@@ -143,7 +143,12 @@ def calculate_std(matching_folders):
     """
     Compute per-channel standard deviations from airpods_motion_d*.csv (NOT ds files),
     aggregate them per participant and overall, and DISPLAY a plot of participants'
-    average std per channel (excluding the 4 relative quaternions).
+    average std per channel.
+
+    Changes vs. previous version:
+    - Excludes 'pitch_rad' from ALL std computations and from the plot.
+    - Still excludes the 4 relative quaternion channels ('quat_rel_x','quat_rel_y',
+      'quat_rel_z','quat_rel_w') from the plot (but they are included in stats if present).
 
     Parameters
     ----------
@@ -166,8 +171,8 @@ def calculate_std(matching_folders):
         {
           participant_display_name : {
               channel : {
-                  "mean_std" : float,       # mean of per-session stds for this participant
-                  "std_of_std" : float,     # std (population, ddof=0) of those per-session stds
+                  "mean_std" : float,
+                  "std_of_std" : float,
                   "n_sessions" : int
               }, ...
           }, ...
@@ -178,8 +183,8 @@ def calculate_std(matching_folders):
         std-of-std *across participants* (computed over the per-participant mean_std values).
         {
           channel : {
-              "mean_std" : float,          # mean across participants of each participant's mean_std
-              "std_of_std" : float,        # std across participants of each participant's mean_std
+              "mean_std" : float,
+              "std_of_std" : float,
               "n_participants" : int
           }, ...
         }
@@ -190,8 +195,9 @@ def calculate_std(matching_folders):
     * The timestamp column is excluded automatically (common names: t_sec, timestamp, time, ...).
     * Only numeric columns are considered (non-numeric coerced to NaN and ignored).
     * All std computations use population std (ddof=0) and ignore NaNs.
-    * The plot pops up (plt.show()) and is NOT saved. The 4 relative quaternion channels
-      ('quat_rel_x','quat_rel_y','quat_rel_z','quat_rel_w') are excluded from the plot.
+    * 'pitch_rad' is excluded from statistics and from the plot.
+    * The plot pops up (plt.show()) and is NOT saved.
+    * The 4 relative quaternion channels are excluded from the plot.
     """
     import os
     import re
@@ -204,6 +210,8 @@ def calculate_std(matching_folders):
     # ---- configuration ----
     DATA_ROOT = os.path.join(os.getcwd(), "data")
     BEEP_GLOB = os.path.join(DATA_ROOT, "beep_schedules_*")  # where sessions live
+    PITCH_EXCLUDE = {"pitch_rad"}  # case-insensitive match handled below
+    REL_QUAT_EXCLUDE_FROM_PLOT = {"quat_rel_x", "quat_rel_y", "quat_rel_z", "quat_rel_w"}
 
     # ---- helpers ----
     def _natural_key(path_or_name: str):
@@ -243,7 +251,7 @@ def calculate_std(matching_folders):
         out = [d for d in all_dirs if _participant_key_from_basename(d) == key]
         return sorted(out, key=_natural_key)
 
-    # ---- build participant -> [session folders] map (canonicalize while preserving display names) ----
+    # ---- build participant -> [session folders] map ----
     all_session_dirs = _gather_all_session_dirs()
     participants = {}  # canonical_key -> {"display": display_name, "sessions": [dirs...]}
 
@@ -300,7 +308,11 @@ def calculate_std(matching_folders):
                 continue
 
             time_col = _detect_time_col(df)
-            feat_cols = [c for c in df.columns if c != time_col]
+
+            # --- feature columns excluding the time column AND 'pitch_rad' (case-insensitive) ---
+            lower_map = {c.lower(): c for c in df.columns}
+            feat_cols_all = [c for c in df.columns if c != time_col]
+            feat_cols = [c for c in feat_cols_all if c.lower() not in PITCH_EXCLUDE]
             if not feat_cols:
                 continue
 
@@ -326,10 +338,10 @@ def calculate_std(matching_folders):
             per_file_std[display_name] = file_stats_for_participant
 
     # ---- per-participant aggregates: mean_std and std_of_std (across that participant's sessions) ----
+    from collections import defaultdict as _dd
     per_participant_avg_std = {}
     for disp_name, files_dict in per_file_std.items():
-        # accumulate vectors of session-stds per channel
-        acc = defaultdict(list)
+        acc = _dd(list)
         for _sess, ch_stats in files_dict.items():
             for ch, v in ch_stats.items():
                 if np.isfinite(v):
@@ -348,11 +360,10 @@ def calculate_std(matching_folders):
                 "n_sessions": int(arr.size),
             }
 
-        # stable ordering of channels
         per_participant_avg_std[disp_name] = {k: ch_agg[k] for k in sorted(ch_agg.keys(), key=lambda s: s.lower())}
 
     # ---- overall aggregates across participants (computed over participant mean_std values) ----
-    channel_to_participant_means = defaultdict(list)
+    channel_to_participant_means = _dd(list)
     for _pname, ch_dict in per_participant_avg_std.items():
         for ch, d in ch_dict.items():
             val = d.get("mean_std", np.nan)
@@ -365,19 +376,19 @@ def calculate_std(matching_folders):
         if arr.size == 0:
             continue
         overall_avg_std[ch] = {
-            "mean_std": float(np.nanmean(arr)),           # mean across participants of participant mean_std
-            "std_of_std": float(np.nanstd(arr, ddof=0)),  # std across participants of participant mean_std
+            "mean_std": float(np.nanmean(arr)),
+            "std_of_std": float(np.nanstd(arr, ddof=0)),
             "n_participants": int(arr.size),
         }
 
-    # ---- plotting: participants' average std per channel (exclude quat_rel_*) ----
-    # collect union of channels, then filter out the 4 relative quaternions
-    rel_quat_set = {"quat_rel_x", "quat_rel_y", "quat_rel_z", "quat_rel_w"}
+    # ---- plotting: participants' average std per channel (exclude quat_rel_* and pitch_rad) ----
     channels = set()
     for _pname, ch_dict in per_participant_avg_std.items():
         channels.update(ch_dict.keys())
-    channels_to_plot = [c for c in sorted(channels, key=lambda s: s.lower())
-                        if c.lower() not in rel_quat_set]
+    channels_to_plot = [
+        c for c in sorted(channels, key=lambda s: s.lower())
+        if c.lower() not in REL_QUAT_EXCLUDE_FROM_PLOT and c.lower() not in PITCH_EXCLUDE
+    ]
 
     if channels_to_plot and per_participant_avg_std:
         participants_order = sorted(per_participant_avg_std.keys(), key=lambda s: s.lower())
@@ -387,12 +398,10 @@ def calculate_std(matching_folders):
         ax = plt.gca()
 
         nP = len(participants_order)
-        # small horizontal jitter so points from different participants don't fully overlap
         jitter = 0.8 / max(nP, 1)
 
         for i, pname in enumerate(participants_order):
-            y_vals = []
-            x_idx = []
+            y_vals, x_idx = [], []
             for j, ch in enumerate(channels_to_plot):
                 v = per_participant_avg_std[pname].get(ch, {}).get("mean_std", np.nan)
                 if np.isfinite(v):
@@ -633,10 +642,10 @@ def plot_reconstructed_signal_slider(
     return fig, ax, s_start
 
 def main():
-    per_file_std, per_participant_avg_std, overall_avg_std = calculate_std(['Abi', 'Ivan', 'Dario', 'Mohid', 'Claire', 'David'])
+    #per_file_std, per_participant_avg_std, overall_avg_std = calculate_std(['Abi', 'Ivan', 'Dario', 'Mohid', 'Claire', 'David'])
     #print(f"Per file std {per_file_std}")
     #print(f"Per participant std {per_participant_avg_std}")
-    print(f"Overall std {overall_avg_std}")
+    #print(f"Overall std {overall_avg_std}")
     '''
     X_train, y_train = X_and_y("train", ['Svetlana', 'Claire', 'Dario', 'Mohid', 'Ivan', 'David', 'Abi'],
                                label_anchor='center') #['Ivan', 'Dario', 'David', 'Claire', 'Mohid']
@@ -678,6 +687,42 @@ def main():
     plt.legend()
     plt.show()
     '''
+    df_claire = pd.read_csv("data/beep_schedules_Claire0/airpods_motion_d1760629578.csv")
+    df_claire = df_claire["acc_y"]
+    df_claire = df_claire.iloc[:500]
+    df_david = pd.read_csv("data/beep_schedules_David0/airpods_motion_d1760039321.csv")
+    df_david = df_david["acc_y"]
+    df_david = df_david.iloc[:500]
+    df_abi = pd.read_csv("data/beep_schedules_Abi0/airpods_motion_d1762015680.csv")
+    df_abi = df_abi["acc_y"]
+    df_abi = df_abi.iloc[:500]
+    df_svetlana = pd.read_csv("data/beep_schedules_Svetlana0/airpods_motion_d1760732782.csv")
+    df_svetlana = df_svetlana["acc_y"]
+    df_svetlana = df_svetlana.iloc[:500]
+
+    df_mohid0 = pd.read_csv("data/beep_schedules_Mohid0/airpods_motion_d1760172227.csv")
+    df_mohid0 = df_mohid0["acc_y"]
+    df_mohid0 = df_mohid0.iloc[:500]
+    df_mohid1 = pd.read_csv("data/beep_schedules_Mohid1/airpods_motion_d1760172227.csv")
+    df_mohid1 = df_mohid1["acc_y"]
+    df_mohid1 = df_mohid1.iloc[:500]
+    df_mohid2 = pd.read_csv("data/beep_schedules_Mohid2/airpods_motion_d1760174060.csv")
+    df_mohid2 = df_mohid2["acc_y"]
+    df_mohid2 = df_mohid2.iloc[:500]
+    df_mohid3 = pd.read_csv("data/beep_schedules_Mohid3/airpods_motion_d1760174615.csv")
+    df_mohid3 = df_mohid3["acc_y"]
+    df_mohid3 = df_mohid3.iloc[:500]
+
+    #plt.plot(df_mohid0.values, label="Mohid0")
+    #plt.plot(df_mohid1.values, label="Mohid1")
+    #plt.plot(df_mohid2.values, label="Mohid2")
+    plt.plot(df_mohid3.values, label="Mohid3")
+    #plt.plot(df_claire.values, label="Claire")
+    #plt.plot(df_abi.values, label="Abi")
+    #plt.plot(df_svetlana.values, label="Svetlana")
+    #plt.plot(df_david.values)
+    plt.legend()
+    plt.show()
 
 if __name__ == '__main__':
     main()

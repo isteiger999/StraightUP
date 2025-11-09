@@ -1793,9 +1793,320 @@ def drop_pitch_channel(X_tot: np.ndarray, y_tot: np.ndarray, copy: bool = False)
     if copy:
         X_nopitch = X_nopitch.copy()
     return X_nopitch, y_tot   
-# -----------------------------
 
-def X_and_y(type, list_comb, label_anchor: str = "end"):
+def keep_only_gravity_channels(X_tot: np.ndarray, y_tot: np.ndarray, copy: bool = False):
+    """
+    Keep only grav_x, grav_y, grav_z from X_tot and drop all other channels.
+    y_tot is passed through unchanged.
+
+    Assumes the _d* file column order provided. After removing the timestamp column
+    (which your code already does via df_imu.iloc[:, 1:]), the per-frame feature
+    order is expected to be:
+        [rot_x, rot_y, rot_z, acc_x, acc_y, acc_z,
+         grav_x, grav_y, grav_z,
+         pitch_rad, quat_rel_x, quat_rel_y, quat_rel_z, quat_rel_w]
+    i.e., C == 14 and gravity sits at indices 6:9.
+
+    If a timestamp channel accidentally remains in X_tot (C == 15), the function
+    auto-adjusts and keeps indices 7:10.
+
+    Parameters
+    ----------
+    X_tot : np.ndarray
+        Shape (N_windows, win_len_frames, n_features)
+    y_tot : np.ndarray
+        Shape (N_windows, 1) or similar. Returned unchanged.
+    copy : bool, default False
+        If True, returns a copy; otherwise returns a view.
+
+    Returns
+    -------
+    X_grav : np.ndarray
+        X_tot reduced to just [grav_x, grav_y, grav_z] (shape: N x T x 3).
+    y_tot : np.ndarray
+        Unchanged.
+    """
+    if X_tot is None:
+        return X_tot, y_tot
+    if X_tot.ndim != 3:
+        raise ValueError(f"X_tot must be 3D (N, T, C), got shape {X_tot.shape}")
+
+    C = X_tot.shape[-1]
+    if C == 14:
+        start = 6      # grav_x at 6, grav_y at 7, grav_z at 8
+    elif C == 15:
+        start = 7      # timestamp still present in X_tot; shift by +1
+    else:
+        raise ValueError(
+            f"Unexpected feature count C={C}. Expected 14 (no timestamp) or 15 (timestamp present) "
+            "per the _d* format: timestamp, rot[3], acc[3], grav[3], pitch, quat[4]."
+        )
+
+    end = start + 3
+    if end > C:
+        raise ValueError("Not enough channels to select grav_x..grav_z with the expected layout.")
+
+    # Use a contiguous slice so the default is a view; honor copy flag if requested.
+    X_grav = X_tot[..., start:end]
+    if copy:
+        X_grav = X_grav.copy()
+    return X_grav, y_tot
+
+# ----------SCALE LARGE CHANELS DOWN------------
+def calculate_std(matching_folders):
+    """
+    Compute per-channel standard deviations from airpods_motion_d*.csv (NOT ds files),
+    aggregate them per participant and overall, and DISPLAY a plot of participants'
+    average std per channel.
+
+    Changes vs. previous version:
+    - Excludes 'pitch_rad' from ALL std computations and from the plot.
+    - Still excludes the 4 relative quaternion channels ('quat_rel_x','quat_rel_y',
+      'quat_rel_z','quat_rel_w') from the plot (but they are included in stats if present).
+
+    Parameters
+    ----------
+    matching_folders : list[str]
+        A list of participant base names (e.g., ["Abi", "Ben"]) OR explicit session folder
+        paths (e.g., ["data/beep_schedules_Abi0", ...]). For each name, all matching
+        session folders (e.g., Abi0..Abi3) are collected under ./data/beep_schedules_*.
+
+    Returns
+    -------
+    per_file_std : dict
+        { participant_display_name :
+            { session_folder_basename : { channel : std, ... }, ... },
+          ...
+        }
+
+    per_participant_avg_std : dict
+        For each participant and channel, includes BOTH the average std (across that
+        participant’s sessions) and the std-of-std across that participant’s sessions.
+        {
+          participant_display_name : {
+              channel : {
+                  "mean_std" : float,
+                  "std_of_std" : float,
+                  "n_sessions" : int
+              }, ...
+          }, ...
+        }
+
+    overall_avg_std : dict
+        For each channel, includes BOTH the overall mean std across participants and the
+        std-of-std *across participants* (computed over the per-participant mean_std values).
+        {
+          channel : {
+              "mean_std" : float,
+              "std_of_std" : float,
+              "n_participants" : int
+          }, ...
+        }
+
+    Notes
+    -----
+    * Only files matching airpods_motion_d[0-9]*.csv are used (explicitly excludes ds files).
+    * The timestamp column is excluded automatically (common names: t_sec, timestamp, time, ...).
+    * Only numeric columns are considered (non-numeric coerced to NaN and ignored).
+    * All std computations use population std (ddof=0) and ignore NaNs.
+    * 'pitch_rad' is excluded from statistics and from the plot.
+    * The plot pops up (plt.show()) and is NOT saved.
+    * The 4 relative quaternion channels are excluded from the plot.
+    """
+    import os
+    import re
+    import glob
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    from collections import defaultdict
+
+    # ---- configuration ----
+    DATA_ROOT = os.path.join(os.getcwd(), "data")
+    BEEP_GLOB = os.path.join(DATA_ROOT, "beep_schedules_*")  # where sessions live
+    PITCH_EXCLUDE = {"pitch_rad"}  # case-insensitive match handled below
+    REL_QUAT_EXCLUDE_FROM_PLOT = {"quat_rel_x", "quat_rel_y", "quat_rel_z", "quat_rel_w"}
+
+    # ---- helpers ----
+    def _natural_key(path_or_name: str):
+        """Split digits so names like 'Claire10' sort after 'Claire2'."""
+        name = os.path.basename(os.fspath(path_or_name)).lower()
+        return [int(s) if s.isdigit() else s for s in re.split(r'(\d+)', name)]
+
+    def _detect_time_col(df, candidates=("t_sec", "timestamp", "time", "time_sec", "epoch", "epoch_s")):
+        lower = {c.lower(): c for c in df.columns}
+        for c in candidates:
+            if c.lower() in lower:
+                return lower[c.lower()]
+        return df.columns[0]  # fallback to first column
+
+    def _participant_key_from_basename(basename: str) -> str:
+        """
+        Extract a stable participant key from a session folder name like 'beep_schedules_Abi0' -> 'abi'.
+        """
+        b = os.path.basename(basename)
+        b = re.sub(r'^(beep_schedules[_\-]*)', '', b, flags=re.IGNORECASE)
+        b = re.sub(r'[_\-]+$', '', b)
+        b = re.sub(r'[_\-]?[0-9]{1,2}$', '', b)     # strip trailing small integer tag
+        b = re.sub(r'^[0-9]{1,2}[_\-]?', '', b)     # strip leading small integer tag if any
+        return b.strip("_- ").lower()
+
+    def _gather_all_session_dirs():
+        return sorted(
+            [p for p in glob.glob(BEEP_GLOB) if os.path.isdir(p)],
+            key=_natural_key
+        )
+
+    def _resolve_sessions_for_name(name_key: str, all_dirs):
+        """
+        Map a participant base name (case-insensitive) to all its session folders.
+        """
+        key = name_key.strip().lower()
+        out = [d for d in all_dirs if _participant_key_from_basename(d) == key]
+        return sorted(out, key=_natural_key)
+
+    # ---- build participant -> [session folders] map ----
+    all_session_dirs = _gather_all_session_dirs()
+    participants = {}  # canonical_key -> {"display": display_name, "sessions": [dirs...]}
+
+    for entry in matching_folders:
+        if os.path.isdir(entry):
+            base = os.path.basename(os.path.normpath(entry))
+            canon = _participant_key_from_basename(base)
+            sessions = _resolve_sessions_for_name(canon, all_session_dirs)
+            display = re.sub(r'[_\-]+$', '', re.sub(r'^(beep_schedules[_\-]*)', '', base, flags=re.IGNORECASE))
+        else:
+            canon = entry.strip().lower()
+            sessions = _resolve_sessions_for_name(canon, all_session_dirs)
+            display = entry  # keep caller's casing
+
+        if not sessions:
+            continue
+
+        if canon not in participants:
+            participants[canon] = {"display": display, "sessions": []}
+        # dedupe while preserving order
+        seen = set(participants[canon]["sessions"])
+        for s in sessions:
+            if s not in seen:
+                participants[canon]["sessions"].append(s)
+                seen.add(s)
+
+    # Early exit if nothing matched
+    if not participants:
+        return {}, {}, {}
+
+    # ---- compute per-file stds ----
+    per_file_std = {}
+    for canon_key in sorted(participants.keys(), key=lambda k: participants[k]["display"].lower()):
+        display_name = participants[canon_key]["display"]
+        session_dirs = participants[canon_key]["sessions"]
+
+        file_stats_for_participant = {}
+        for sess_dir in session_dirs:
+            # only d[0-9]* csv (exclude ds*)
+            csv_files = sorted(
+                glob.glob(os.path.join(sess_dir, "airpods_motion_d[0-9]*.csv")),
+                key=_natural_key
+            )
+            if not csv_files:
+                continue
+
+            csv_path = csv_files[0]  # take first in natural order
+            try:
+                df = pd.read_csv(csv_path, low_memory=False)
+            except Exception:
+                continue  # skip unreadable
+
+            if df.shape[0] == 0 or df.shape[1] == 0:
+                continue
+
+            time_col = _detect_time_col(df)
+
+            # --- feature columns excluding the time column AND 'pitch_rad' (case-insensitive) ---
+            lower_map = {c.lower(): c for c in df.columns}
+            feat_cols_all = [c for c in df.columns if c != time_col]
+            feat_cols = [c for c in feat_cols_all if c.lower() not in PITCH_EXCLUDE]
+            if not feat_cols:
+                continue
+
+            # numeric only; errors -> NaN; compute population std ignoring NaN
+            X = df[feat_cols].apply(pd.to_numeric, errors="coerce")
+            valid_cols = [c for c in feat_cols if X[c].notna().any()]
+            if not valid_cols:
+                continue
+
+            stats = {}
+            for c in valid_cols:
+                col = X[c].to_numpy(dtype=float, copy=False)
+                sigma = float(np.nanstd(col, ddof=0))
+                if np.isfinite(sigma):
+                    stats[c] = sigma
+
+            if stats:
+                file_stats_for_participant[os.path.basename(sess_dir)] = dict(
+                    sorted(stats.items(), key=lambda kv: kv[0].lower())
+                )
+
+        if file_stats_for_participant:
+            per_file_std[display_name] = file_stats_for_participant
+
+    # ---- per-participant aggregates: mean_std and std_of_std (across that participant's sessions) ----
+    from collections import defaultdict as _dd
+    per_participant_avg_std = {}
+    for disp_name, files_dict in per_file_std.items():
+        acc = _dd(list)
+        for _sess, ch_stats in files_dict.items():
+            for ch, v in ch_stats.items():
+                if np.isfinite(v):
+                    acc[ch].append(float(v))
+        if not acc:
+            continue
+
+        ch_agg = {}
+        for ch, vals in acc.items():
+            arr = np.array(vals, dtype=float)
+            mean_std = float(np.nanmean(arr)) if arr.size else float("nan")
+            std_of_std = float(np.nanstd(arr, ddof=0)) if arr.size else float("nan")
+            ch_agg[ch] = {
+                "mean_std": mean_std,
+                "std_of_std": std_of_std,
+                "n_sessions": int(arr.size),
+            }
+
+        per_participant_avg_std[disp_name] = {k: ch_agg[k] for k in sorted(ch_agg.keys(), key=lambda s: s.lower())}
+
+    # ---- overall aggregates across participants (computed over participant mean_std values) ----
+    channel_to_participant_means = _dd(list)
+    for _pname, ch_dict in per_participant_avg_std.items():
+        for ch, d in ch_dict.items():
+            val = d.get("mean_std", np.nan)
+            if np.isfinite(val):
+                channel_to_participant_means[ch].append(float(val))
+
+    overall_avg_std = {}
+    for ch, vals in channel_to_participant_means.items():
+        arr = np.array(vals, dtype=float)
+        if arr.size == 0:
+            continue
+        overall_avg_std[ch] = {
+            "mean_std": float(np.nanmean(arr)),
+            "std_of_std": float(np.nanstd(arr, ddof=0)),
+            "n_participants": int(arr.size),
+        }
+
+    # ---- sort for deterministic returned dicts ----
+    def _sort_nested(d):
+        return {k: d[k] for k in sorted(d.keys(), key=lambda x: str(x).lower())}
+
+    per_file_std = {pk: _sort_nested(per_file_std[pk]) for pk in sorted(per_file_std.keys(), key=lambda x: str(x).lower())}
+    per_participant_avg_std = {pk: _sort_nested(per_participant_avg_std[pk]) for pk in sorted(per_participant_avg_std.keys(), key=lambda x: str(x).lower())}
+    overall_avg_std = _sort_nested(overall_avg_std)
+
+    return per_file_std, per_participant_avg_std, overall_avg_std
+
+
+def X_and_y(type, list_comb, label_anchor):
     """
     Build X (windows) and y (labels) across selected folders.
 
@@ -1839,7 +2150,7 @@ def X_and_y(type, list_comb, label_anchor: str = "end"):
         # use the new inferred files (single canonical one per session)
         event_files = sorted(glob.glob(os.path.join(folder_path, 'events_inferred_*.csv')), key=_natural_key)
         # allow both d* and non-d* IMU filenames
-        imu_files   = sorted(glob.glob(os.path.join(folder_path, 'airpods_motion_ds*.csv')), key=_natural_key)
+        imu_files   = sorted(glob.glob(os.path.join(folder_path, 'airpods_motion_d*.csv')), key=_natural_key)
         if not event_files or not imu_files:
             print(f"⚠️ Missing files in {folder_path}")
             continue
@@ -1912,4 +2223,301 @@ def X_and_y(type, list_comb, label_anchor: str = "end"):
     #return X_tot, y_tot
     X_tot, y_tot = drop_quaternion_channels(X_tot, y_tot)  # 14 → 10 chans
     X_tot, y_tot = drop_pitch_channel(X_tot, y_tot)        # 10 → 9 chans
+    #X_tot, y_tot = keep_only_gravity_channels(X_tot, y_tot)  # 14 → 3
+
+    def scale_group_to_base_std(
+        base,
+        to_be_scaled,
+        *,
+        agg="mean",                     # "mean" or "median" across participants
+        weight_by_sessions=True,        # if mean, weight each participant by #selected sessions
+        eps=1e-8,                       # floor for denominator
+        clip=10.0,                      # clamp ratios to [1/clip, clip]; set None to disable
+        verbose=True,
+        return_info=False               # set True to get (X_scaled, info)
+    ):
+        """
+        Returns a scaled copy of X_tot, multiplying ONLY the windows belonging to the
+        explicitly selected sessions in `to_be_scaled`.
+
+        You can pass items like:
+            base        = ["Abi[0-3]", "Ben[0-3]", "Cara[0-3]"]
+            to_be_scaled= ["Claire[0-2]"]        # scales 0,1,2 but not 3
+
+        Notation in square brackets supports:
+            - Ranges:   [0-3]
+            - Lists:    [0,2,3]
+            - Mix:      [0,2-3]
+        If no brackets are provided (e.g., "Abi"), all sessions for that participant
+        are considered for the stats (and scaled if in to_be_scaled).
+
+        Relies on outer-scope variables of X_and_y:
+            - X_tot (n_windows x win_len x n_channels)
+            - matching_folders (list of session folder paths, natural-sorted)
+            - windows_per_rec (int)
+
+        Returns
+        -------
+        X_scaled : np.ndarray
+            Scaled copy of X_tot.
+        (optional) info : dict
+            Diagnostics including scale factors, group stds, and missing selections.
+        """
+        import os, re, glob
+        import numpy as np
+        import pandas as pd
+        from collections import defaultdict
+
+        # ---------- canonicalizers ----------
+        def _canon_name(s):
+            b = str(s)
+            b = re.sub(r'^(beep_schedules[_\-]*)', '', b, flags=re.IGNORECASE)
+            b = re.sub(r'[_\-]+$', '', b)
+            b = re.sub(r'[_\-]?[0-9]{1,2}$', '', b)
+            b = re.sub(r'^[0-9]{1,2}[_\-]?', '', b)
+            return b.strip("_- ").lower()
+
+        def _canon_ch(s):
+            return str(s).strip().lower()
+
+        def _natural_key(path_or_name: str):
+            name = os.path.basename(os.fspath(path_or_name)).lower()
+            return [int(s) if s.isdigit() else s for s in re.split(r'(\d+)', name)]
+
+        def _session_index_from_basename(basename: str):
+            m = re.search(r'(\d+)$', os.path.basename(str(basename)))
+            return int(m.group(1)) if m else None
+
+        # ---------- parse specs like "Abi[0-3]" / "Ben[1,3]" ----------
+        def _parse_spec_list(items):
+            """
+            Returns a dict:
+              { canon_name : {"display": <name>, "indices": None or set[int]} }
+            """
+            out = {}
+            for raw in items:
+                s = str(raw).strip()
+                m = re.match(r'^\s*(?:beep_schedules[_\-]*)?([A-Za-z0-9_\-]+)(?:\[(.*?)\])?\s*$', s)
+                if m:
+                    name = m.group(1)
+                    sel  = m.group(2)
+                else:
+                    name = s
+                    sel  = None
+
+                indices = None
+                if sel is not None and sel != "":
+                    indices = set()
+                    for tok in sel.split(","):
+                        tok = tok.strip()
+                        if not tok:
+                            continue
+                        if "-" in tok:
+                            a, b = tok.split("-", 1)
+                            try:
+                                ai, bi = int(a), int(b)
+                            except Exception:
+                                continue
+                            if ai <= bi:
+                                rng = range(ai, bi + 1)
+                            else:
+                                rng = range(bi, ai + 1)
+                            indices.update(rng)
+                        else:
+                            try:
+                                indices.add(int(tok))
+                            except Exception:
+                                pass
+
+                canon = _canon_name(name)
+                if canon in out:
+                    old = out[canon]["indices"]
+                    if old is None or indices is None:
+                        out[canon]["indices"] = None
+                    else:
+                        out[canon]["indices"].update(indices)
+                else:
+                    out[canon] = {"display": name, "indices": indices}
+            return out
+
+        base_map = _parse_spec_list(base)
+        tbs_map  = _parse_spec_list(to_be_scaled)
+
+        # ---------- channel names after your drops (quat_rel_* + pitch_rad) ----------
+        first_cols = None
+        for fp in matching_folders:
+            imu_files = sorted(glob.glob(os.path.join(fp, 'airpods_motion_d*.csv')), key=_natural_key)
+            if not imu_files:
+                continue
+            try:
+                cols = pd.read_csv(imu_files[0], nrows=1).columns.tolist()
+            except Exception:
+                continue
+            if len(cols) >= 2:
+                first_cols = cols[1:]  # drop time column
+                break
+
+        if first_cols is None:
+            if verbose:
+                print("[std-scale] Could not read any IMU header; skipping scaling.")
+            return (X_tot, {}) if return_info else X_tot
+
+        drop_set = {"quat_rel_x", "quat_rel_y", "quat_rel_z", "quat_rel_w", "pitch_rad"}
+        channel_names_after_drops = [c for c in first_cols if _canon_ch(c) not in drop_set]
+
+        if len(channel_names_after_drops) != X_tot.shape[-1]:
+            if verbose:
+                print(f"[std-scale] Header-derived channel count ({len(channel_names_after_drops)}) "
+                      f"does not match X_tot last dim ({X_tot.shape[-1]}). Skipping scaling.")
+            return (X_tot, {}) if return_info else X_tot
+
+        # ---------- compute per-file stds for union of requested participants ----------
+        names_for_stats = sorted({d["display"] for d in base_map.values()} |
+                                 {d["display"] for d in tbs_map.values()})
+        try:
+            per_file_std, _pp, _ov = calculate_std(names_for_stats)
+        except Exception as e:
+            if verbose:
+                print(f"[std-scale] calculate_std failed: {e}; skipping scaling.")
+            return (X_tot, {}) if return_info else X_tot
+
+        # Canonicalize per_file_std keys
+        per_file_std_by_canon = defaultdict(dict)  # {canon: {sess_basename: {ch:std}}}
+        for disp, sess_dict in per_file_std.items():
+            canon = _canon_name(disp)
+            per_file_std_by_canon[canon].update(sess_dict)
+
+        # ---------- aggregate group stds over SELECTED sessions ----------
+        def _aggregate_group_from_selected(per_file_canon, spec_map):
+            ch_to_vals = defaultdict(list)  # per-channel list of per-participant means
+            ch_to_w    = defaultdict(list)  # weights per participant (num selected sessions with that channel)
+            missing = []                    # participants with no selected sessions found
+            missing_sessions = {}           # {display: sorted(list-of-indices-that-were-requested-but-missing)}
+
+            for canon, d in spec_map.items():
+                sess_stats = per_file_canon.get(canon, {})
+                allowed = d["indices"]  # None -> all sessions
+                # collect per-session values per channel for selected sessions
+                ch_to_session_vals = defaultdict(list)
+                got_any = False
+                present_indices = set()
+
+                for sess_base, ch_stats in sess_stats.items():
+                    sidx = _session_index_from_basename(sess_base)
+                    if allowed is None or (sidx is not None and sidx in allowed):
+                        got_any = True
+                        if sidx is not None:
+                            present_indices.add(sidx)
+                        for ch, v in ch_stats.items():
+                            if np.isfinite(v):
+                                ch_to_session_vals[_canon_ch(ch)].append(float(v))
+
+                if not got_any:
+                    missing.append(d["display"])
+                    if d["indices"] not in (None, set()):
+                        # report missing indices exactly
+                        missing_sessions[d["display"]] = sorted(list(d["indices"])) if d["indices"] else []
+                    continue
+
+                if d["indices"]:
+                    miss_idx = sorted(list(d["indices"] - present_indices))
+                    if miss_idx:
+                        missing_sessions[d["display"]] = miss_idx
+
+                # per-participant mean over their selected sessions
+                for chn, vals in ch_to_session_vals.items():
+                    mean_std = float(np.mean(vals))
+                    w = float(len(vals))
+                    ch_to_vals[chn].append(mean_std)
+                    ch_to_w[chn].append(w)
+
+            # finalize group aggregation across participants
+            group_std = {}
+            for chn, vals in ch_to_vals.items():
+                arr = np.array(vals, dtype=float)
+                if agg == "median":
+                    group_std[chn] = float(np.median(arr))
+                else:
+                    if weight_by_sessions:
+                        ws = np.array(ch_to_w[chn], dtype=float)
+                        sw = ws.sum()
+                        group_std[chn] = float((arr * ws).sum() / sw) if sw > 0 else float(np.mean(arr))
+                    else:
+                        group_std[chn] = float(np.mean(arr))
+
+            return group_std, missing, missing_sessions
+
+        base_std, miss_base, miss_base_sess = _aggregate_group_from_selected(per_file_std_by_canon, base_map)
+        tbs_std,  miss_tbs,  miss_tbs_sess  = _aggregate_group_from_selected(per_file_std_by_canon, tbs_map)
+
+        # ---------- ratios base / to_be_scaled, aligned to X_tot order ----------
+        common = set(base_std.keys()).intersection(tbs_std.keys())
+        ratio_by_ch = {}
+        for ch in common:
+            b = base_std[ch]; t = tbs_std[ch]
+            if not np.isfinite(b): b = 0.0
+            if not np.isfinite(t): t = 0.0
+            if t <= eps and b <= eps:
+                r = 1.0
+            elif t <= eps:
+                r = b / eps
+            else:
+                r = b / max(t, eps)
+            if clip is not None and clip > 1:
+                r = min(max(r, 1.0/clip), clip)
+            ratio_by_ch[ch] = float(r)
+
+        scale_vec = np.ones(len(channel_names_after_drops), dtype=float)
+        scale_per_channel = {}
+        channels_not_scaled = []
+        for i, name in enumerate(channel_names_after_drops):
+            key = _canon_ch(name)
+            if key in ratio_by_ch:
+                scale_vec[i] = ratio_by_ch[key]
+                scale_per_channel[name] = ratio_by_ch[key]
+            else:
+                channels_not_scaled.append(name)
+
+        # ---------- build window mask ONLY for selected sessions in to_be_scaled ----------
+        n_windows = X_tot.shape[0]
+        mask = np.zeros(n_windows, dtype=bool)
+        for idx, folder_path in enumerate(matching_folders):
+            base_name = os.path.basename(os.path.normpath(folder_path))
+            canon = _canon_name(base_name)
+            sidx  = _session_index_from_basename(base_name)
+            spec  = tbs_map.get(canon)
+            if spec is None:
+                continue
+            allowed = spec["indices"]
+            selected = (allowed is None) or (sidx is not None and sidx in allowed)
+            if selected:
+                start = idx * windows_per_rec
+                end   = min(start + windows_per_rec, n_windows)
+                mask[start:end] = True
+
+        # ---------- apply scaling ----------
+        X_scaled = X_tot.copy()
+        scale_tensor = scale_vec[np.newaxis, np.newaxis, :].astype(X_scaled.dtype, copy=False)
+        X_scaled[mask, :, :] *= scale_tensor
+
+        if verbose:
+            print(f"[std-scale] Scaled {mask.sum()} of {mask.size} windows "
+                  f"({mask.sum()/max(1,mask.size):.1%}). "
+                  f"Channels scaled: {len(scale_per_channel)}; skipped: {len(channels_not_scaled)}.")
+
+        info = {
+            "scale_per_channel": scale_per_channel,
+            "base_group_std":    {c: base_std.get(_canon_ch(c), np.nan) for c in channel_names_after_drops},
+            "tbs_group_std":     {c: tbs_std.get(_canon_ch(c), np.nan)  for c in channel_names_after_drops},
+            "missing_participants": {"base": miss_base, "to_be_scaled": miss_tbs},
+            "missing_sessions": {"base": miss_base_sess, "to_be_scaled": miss_tbs_sess},
+            "channels_not_scaled": channels_not_scaled
+        }
+        return (X_scaled, info) if return_info else X_scaled
+    
+    X_tot = scale_group_to_base_std(
+        base=["Abi[0-3]","Claire[0-3]"],
+        to_be_scaled=["Dario[0-3]","David[0-3]","Ivan[0-3]","Mohid[0-2]"]
+    )
+
     return remove_edge_windows(X_tot, y_tot)

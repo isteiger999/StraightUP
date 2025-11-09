@@ -35,7 +35,7 @@ def main():
         X_test, y_test = X_and_y("test", list_comb, label_anchor="center")
         
         # 2. Train & Evaluate CNN
-        model, history = CNN_model(X_train, y_train, X_val, y_val, verbose = 0)
+        model, history = CNN_model(X_train, y_train, X_val, y_val, verbose = 1)
         #model, history = train_eval_tcn(X_train, y_train, X_val, y_val, verbose=1)
 
         # 3. Testing the CNN

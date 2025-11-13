@@ -26,7 +26,7 @@ def main():
         class_names=["upright", "transition", "slouch"],
         save_dir="confusion_matrix"
     )
-
+    
     for index, (_, list_comb) in enumerate(sorted(combinations.items(), key=lambda kv: int(kv[0]))):
 
         # 1. Create non-overlapping datasets
@@ -54,10 +54,11 @@ def main():
     std_mean(mean, std) 
 
     # print Confusion matrix (0 = upright, 1 = transition, 2 = slouch) #
-    png_recall = cm_avg.save_figure(model_tag="cnn", normalize="true")  # recall view (for precision use normalize="pred")
-    print("✅ Saved averaged confusion matrix")
+    #png_recall = cm_avg.save_figure(model_tag="cnn", normalize="true")  # recall view (for precision use normalize="pred")
+    #print("✅ Saved averaged confusion matrix")
     
-    export_coreml(X_train, model, out_path="PostureCNN.mlpackage")
+    #export_coreml(X_train, model, out_path="PostureCNN.mlpackage")
+    
 
 if __name__ == '__main__':
     main() 

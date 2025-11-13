@@ -44,7 +44,8 @@ def folders_tot(type, list_comb):
         # Build the pattern using an f-string to insert the current ending
         # Example: 'beep_schedules_*0'
         DATA_ROOT = os.path.join(os.getcwd(), "data")
-        pattern = os.path.join(DATA_ROOT, f'beep_schedules_{ending}*')
+        # pattern = os.path.join(DATA_ROOT, f'beep_schedules_{ending}*')
+        pattern = os.path.join(DATA_ROOT, f'beep_schedules_{ending}[0123]') # 10. November 2025: trying to use only 2 folders
         
         # Find all paths matching the specific pattern
         current_matches = sorted(glob.glob(pattern), key=_natural_key)
@@ -1250,7 +1251,7 @@ def edit_csv():
             except Exception as e:
                 print(f"⚠️ Delta conversion skipped for: {csv_path}\n   ↳ {e}")
                 continue
-
+            '''
             ### NEW FILE WITH SCALED-DELTA (per-file σ) ###
             try:
                 compute_and_save_delta_scaled_once(
@@ -1262,6 +1263,7 @@ def edit_csv():
                 )
             except Exception as e:
                 print(f"⚠️ Scaled-delta skipped for: {csv_path}\n   ↳ {e}")
+            '''
 
 def individual_accuracy(model, X_test, y_test, classes=(0, 1, 2)):
     """
@@ -2517,7 +2519,7 @@ def X_and_y(type, list_comb, label_anchor):
     
     X_tot = scale_group_to_base_std(
         base=["Abi[0-3]","Claire[0-3]"],
-        to_be_scaled=["Dario[0-3]","David[0-3]","Ivan[0-3]","Mohid[0-2]"]
+        to_be_scaled=["Dario[0-3]","David[0-3]","Ivan[0-3]","Mohid[1-2]"]
     )
 
     return remove_edge_windows(X_tot, y_tot)

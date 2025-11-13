@@ -646,16 +646,17 @@ def main():
     #print(f"Per file std {per_file_std}")
     #print(f"Per participant std {per_participant_avg_std}")
     #print(f"Overall std {overall_avg_std}")
+    # Plot signals with slides
     '''
-    X_train, y_train = X_and_y("train", ['Svetlana', 'Claire', 'Dario', 'Mohid', 'Ivan', 'David', 'Abi'],
-                               label_anchor='center') #['Ivan', 'Dario', 'David', 'Claire', 'Mohid']
+    X_train, y_train = X_and_y("train", ['Mohid', 'Svetlana', 'Claire', 'Dario', 'Ivan', 'David', 'Abi'],
+                               label_anchor='center') #['Mohid', 'Svetlana', 'Claire', 'Dario', 'Ivan', 'David', 'Abi']
     #plot_label_verlauf(y_train, length=2900)
-
+    
     plot_reconstructed_signal_slider(
         X_train, y_train,
         windows=75,
-        chanel=[9], #4
-        view_windows=100,
+        chanel=[7], #4
+        view_windows=200,
         start_window=0
     )
     
@@ -664,6 +665,8 @@ def main():
     #delete_airpods_motion_d_csvs("data", dry_run=False)  # actually delete
     #delete_airpods_motion_ds_csvs("data", dry_run=False)
     '''
+
+    # Filter the data
     '''
     df = pd.read_csv(r"data/beep_schedules_Claire0/airpods_motion_d1760629578.csv")
     duration = 1600
@@ -687,71 +690,18 @@ def main():
     plt.legend()
     plt.show()
     '''
+    # Plot Mohid0 etc.
+    '''
+    length = 4000
+    df_mohid0_raw = pd.read_csv("data/beep_schedules_Mohid0/airpods_motion_1760171772.csv")
+    df_mohid0_raw = df_mohid0_raw["grav_y"]
+    df_mohid0_raw = df_mohid0_raw.iloc[:length]
+    df_mohid0_d = pd.read_csv("data/beep_schedules_Mohid0/airpods_motion_d1760171772.csv")
+    df_mohid0_d = df_mohid0_d["grav_y"]
+    df_mohid0_d = df_mohid0_d.iloc[:length]
     
-    df_claire = pd.read_csv("data/beep_schedules_David0/airpods_motion_d1760039321.csv")
-    df_claire_grav_z = df_claire["grav_z"]
-    df_claire_grav_z = df_claire_grav_z.iloc[:500]
-    df_claire_grav_y = df_claire["grav_y"]
-    df_claire_grav_y = df_claire_grav_y.iloc[:500]
-    df_claire_grav_x = df_claire["grav_x"]
-    df_claire_grav_x = df_claire_grav_x.iloc[:500]
-    '''
-    df_david = pd.read_csv("data/beep_schedules_David0/airpods_motion_d1760039321.csv")
-    df_david = df_david["grav_z"]
-    df_david = df_david.iloc[:500]
-    df_abi = pd.read_csv("data/beep_schedules_Abi0/airpods_motion_d1762015680.csv")
-    df_abi = df_abi["grav_z"]
-    df_abi = df_abi.iloc[:500]
-    '''
-    
-    plt.plot(df_claire_grav_z.values, label="claire grav_z")
-    plt.plot(df_claire_grav_y.values, label="claire grav_y")
-    plt.plot(df_claire_grav_x.values, label="claire grav_x")
-    plt.legend()
-    plt.show()
-    '''
-    df_mohid0 = pd.read_csv("data/beep_schedules_Mohid0/airpods_motion_d1760172227.csv")
-    df_mohid0 = df_mohid0["acc_y"]
-    df_mohid0 = df_mohid0.iloc[:500]
-    df_mohid1 = pd.read_csv("data/beep_schedules_Mohid1/airpods_motion_d1760172227.csv")
-    df_mohid1 = df_mohid1["acc_y"]
-    df_mohid1 = df_mohid1.iloc[:500]
-    df_mohid2 = pd.read_csv("data/beep_schedules_Mohid2/airpods_motion_d1760174060.csv")
-    df_mohid2 = df_mohid2["acc_y"]
-    df_mohid2 = df_mohid2.iloc[:500]
-    df_mohid3 = pd.read_csv("data/beep_schedules_Mohid3/airpods_motion_d1760174615.csv")
-    df_mohid3 = df_mohid3["acc_y"]
-    df_mohid3 = df_mohid3.iloc[:500]
-    '''
-    '''
-    df_test1 = pd.read_csv("airpods_motion_1762617123.csv")
-    df_test2 = pd.read_csv("airpods_motion_1762618651.csv")
-    df_test3 = pd.read_csv("airpods_motion_1762621605.csv")
-    df_test4 = pd.read_csv("airpods_motion_1762622942.csv")
-    df_test5 = pd.read_csv("airpods_motion_1762624794.csv")
-    df_test5 = df_test5['acc_y']
-
-    df_test1 = df_test1['acc_y']
-    df_test2 = df_test2['acc_y']
-    df_test3 = df_test3['acc_y']
-    df_test_gravz = df_test4['grav_z']
-    df_test_gravy = df_test4['grav_y']
-    df_test_gravx = df_test4['grav_x']
-    #plt.plot(df_mohid0.values, label="Mohid0")
-    #plt.plot(df_mohid1.values, label="Mohid1")
-    #plt.plot(df_mohid2.values, label="Mohid2")
-    #plt.plot(df_test1.values, label="test1 Ivan 8. Nov")
-    #plt.plot(df_test2.values, label="test2 Ivan 8. Nov")
-    plt.plot(df_test5.values, label="test5 Ivan 8. Nov")
-    #plt.plot(df_test_gravz.values, label="grav_z Ivan 8. Nov")
-    #plt.plot(df_test_gravy.values, label="grav_y Ivan 8. Nov")
-    #plt.plot(df_test_gravx.values, label="grav_x Ivan 8. Nov")
-    #plt.plot(np.arange(len(df_test4)), np.sqrt(df_test_gravz**2 + df_test_gravy**2 + df_test_gravx**2))
-
-    #plt.plot(df_claire.values, label="Claire")
-    #plt.plot(df_abi.values, label="Abi")
-    #plt.plot(df_svetlana.values, label="Svetlana")
-    #plt.plot(df_david.values)
+    #plt.plot(df_mohid0_raw.values, label="Mohid0 raw")
+    plt.plot(df_mohid0_d.values, label="Mohid0 delta")
     plt.legend()
     plt.show()
     '''

@@ -642,24 +642,24 @@ def plot_reconstructed_signal_slider(
     return fig, ax, s_start
 
 def main():
-    per_file_std, per_participant_avg_std, overall_avg_std = calculate_std(['Abi', 'Ivan', 'Dario', 'Mohid', 'Claire', 'David', 'Svetlana'])
+    #per_file_std, per_participant_avg_std, overall_avg_std = calculate_std(['MA', 'Abi', 'Ivan', 'Dario', 'Mohid', 'Claire', 'David', 'Svetlana'])
     #print(f"Per file std {per_file_std}")
     #print(f"Per participant std {per_participant_avg_std}")
     #print(f"Overall std {overall_avg_std}")
     # Plot signals with slides
-    '''
-    X_train, y_train = X_and_y("train", ['Mohid', 'Svetlana', 'Claire', 'Dario', 'Ivan', 'David', 'Abi'],
+    
+    X_train, y_train = X_and_y("train", ['MA', 'MA', 'MA'],
                                label_anchor='center') #['Mohid', 'Svetlana', 'Claire', 'Dario', 'Ivan', 'David', 'Abi']
     #plot_label_verlauf(y_train, length=2900)
     
     plot_reconstructed_signal_slider(
         X_train, y_train,
         windows=75,
-        chanel=[7], #4
+        chanel=[4], #4 = acc_y, 
         view_windows=200,
         start_window=0
     )
-    
+    '''
     ##
     # Delete delta files:
     #delete_airpods_motion_d_csvs("data", dry_run=False)  # actually delete

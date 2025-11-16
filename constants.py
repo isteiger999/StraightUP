@@ -85,9 +85,15 @@ python batch_infer_events.py --verbose --pre 0.05 --post 0.9 --offset 2.0
 '''
 # Single Person
 python batch_infer_events.py \
-  --root data/beep_schedules_MA1 \
+  --root data/beep_schedules_MA0 \
   --glob "airpods_motion_*.csv" \
   --verbose --pre 0.05 --post 0.90 --offset 2.0
+
+#-------- NEW VERSION (15 Nov)(no 2 sec subtraction)--------#
+python batch_infer_events.py \
+  --root data/beep_schedules_MA0 \
+  --glob "airpods_motion_*.csv" \
+  --verbose --pre 0.05 --post 0.90 --offset 1.0
 '''
 
 '''

@@ -1215,7 +1215,7 @@ def edit_csv():
                 continue
 
             # --- add/refresh derived columns (idempotent) ---
-            fix_length(df_imu, target_len=18_000)
+            #fix_length(df_imu, target_len=18_000)
             add_pitch_to_df(df_imu)  # modifies df_imu in place
             remove_columns(df_imu, ['roll_rad', 'yaw_rad'])
             #add_roll_to_df(df_imu)
@@ -1239,18 +1239,6 @@ def edit_csv():
                 )
             except Exception as e:
                 print(f"⚠️ Delta conversion skipped for: {csv_path}\n   ↳ {e}")
-
-            try:
-                out_delta, _ = compute_and_save_delta_once(
-                    df_imu,
-                    csv_path=csv_path,
-                    baseline_method="median",   # or "mean" as you like
-                    min_window_seconds=1.0,
-                    verbose=False,
-                )
-            except Exception as e:
-                print(f"⚠️ Delta conversion skipped for: {csv_path}\n   ↳ {e}")
-                continue
             '''
             ### NEW FILE WITH SCALED-DELTA (per-file σ) ###
             try:

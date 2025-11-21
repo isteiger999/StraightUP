@@ -14,6 +14,7 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix
 import re
+import math
 
 
 # count number of beep_schedules_folders:
@@ -1185,7 +1186,185 @@ def compute_and_save_delta_scaled_once(
             print(f"⏭️  Scaled-delta appeared concurrently; skipping: {out_csv}")
         return out_csv, False, sigmas
 
-#########################
+######### Upsample all Z-names to 50Hz ########
+def upsample_hz(
+    df_imu: pd.DataFrame,
+    fs: float = 50.0,
+    ts_col: str = "timestamp",
+    quat_cols=("quat_x","quat_y","quat_z","quat_w"),
+    trim_ends: bool = True,
+    inplace: bool = True
+) -> pd.DataFrame:
+    """
+    Resample/upsample an IMU dataframe to a uniform grid at `fs` Hz.
+
+    - `timestamp` is seconds since epoch (float), possibly jittery/irregular.
+    - Non-quaternion numeric columns are linearly interpolated.
+    - Quaternion columns are resampled with SLERP and renormalized.
+    - If `trim_ends=True`, the output grid lies fully inside [min_ts, max_ts] (no extrapolation).
+    - If `inplace=True` (default), the input dataframe is mutated and also returned.
+
+    Returns: the resampled dataframe (new object if `inplace=False`, else the mutated `df_imu`).
+    """
+    # --- helpers ---
+    def _make_uniform_grid(ts: np.ndarray, fs: float, trim_ends: bool = True) -> np.ndarray:
+        ts = np.asarray(ts, dtype=np.float64)
+        t0, t1 = ts[0], ts[-1]
+        if trim_ends:
+            n = int(np.floor((t1 - t0) * fs)) + 1
+            n = max(n, 2)
+            t_new = t0 + (np.arange(n, dtype=np.float64) / fs)
+            if t_new[-1] > t1:
+                t_new[-1] = t1
+            return t_new
+        else:
+            n = int(np.round((t1 - t0) * fs)) + 1
+            n = max(n, 2)
+            return np.linspace(t0, t1, n, dtype=np.float64)
+
+    def _interp_column(ts, ys, t_new):
+        ts = np.asarray(ts, dtype=np.float64)
+        ys = np.asarray(ys, dtype=np.float64)
+        good = np.isfinite(ts) & np.isfinite(ys)
+        ts_g, ys_g = ts[good], ys[good]
+        if ts_g.size < 2:
+            return np.full_like(t_new, np.nan, dtype=np.float64)
+        order = np.argsort(ts_g, kind="mergesort")
+        ts_g, ys_g = ts_g[order], ys_g[order]
+        # deduplicate times (keep last)
+        uniq = np.ones_like(ts_g, dtype=bool)
+        uniq[1:] = ts_g[1:] != ts_g[:-1]
+        ts_g, ys_g = ts_g[uniq], ys_g[uniq]
+        return np.interp(t_new, ts_g, ys_g)
+
+    def _normalize_quat_array(Q):
+        Q = np.asarray(Q, dtype=np.float64)
+        n = np.linalg.norm(Q, axis=1, keepdims=True)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            Qn = np.where(n > 0, Q / n, 0.0)
+        bad = (n.flatten() <= 0) | ~np.isfinite(n.flatten())
+        if bad.any():
+            Qn[bad] = np.array([0.0, 0.0, 0.0, 1.0])
+        return Qn
+
+    def _slerp_pair(q0, q1, u):
+        dot = float(np.dot(q0, q1))
+        if dot < 0.0:
+            q1 = -q1
+            dot = -dot
+        dot = min(1.0, max(-1.0, dot))
+        if dot > 0.9995:
+            q = q0 + u * (q1 - q0)
+            q /= np.linalg.norm(q)
+            return q
+        theta_0 = math.acos(dot)
+        sin_theta_0 = math.sin(theta_0)
+        theta = theta_0 * u
+        s0 = math.sin(theta_0 - theta) / sin_theta_0
+        s1 = math.sin(theta) / sin_theta_0
+        q = s0*q0 + s1*q1
+        q /= np.linalg.norm(q)
+        return q
+
+    def _slerp_times(ts, Q, t_new):
+        ts = np.asarray(ts, dtype=np.float64)
+        Q = _normalize_quat_array(Q)
+        M = t_new.size
+        Q_new = np.empty((M, 4), dtype=np.float64)
+        idx_right = np.searchsorted(ts, t_new, side="right")
+        for j in range(M):
+            ir = int(idx_right[j])
+            if ir <= 0:
+                Q_new[j] = Q[0];  continue
+            if ir >= ts.size:
+                Q_new[j] = Q[-1]; continue
+            il = ir - 1
+            t0, t1 = ts[il], ts[ir]
+            if not np.isfinite(t0) or not np.isfinite(t1) or t1 <= t0:
+                Q_new[j] = Q[il]; continue
+            u = (t_new[j] - t0) / (t1 - t0)
+            u = 0.0 if u < 0 else (1.0 if u > 1.0 else float(u))
+            Q_new[j] = _slerp_pair(Q[il], Q[ir], u)
+        return Q_new
+
+    # --- validation & cleaning ---
+    if fs <= 0:
+        raise ValueError("fs must be positive")
+    if ts_col not in df_imu.columns:
+        raise KeyError(f"'{ts_col}' not found")
+
+    df = df_imu.copy()  # work on a copy, we’ll write back if inplace
+    df[ts_col] = pd.to_numeric(df[ts_col], errors="coerce")
+    df = df.dropna(subset=[ts_col]).sort_values(ts_col, kind="mergesort")
+    df = df.drop_duplicates(subset=ts_col, keep="last")
+    ts = df[ts_col].to_numpy(dtype=np.float64, copy=False)
+    if ts.size < 2:
+        # nothing to do
+        return df_imu
+
+    # --- target grid ---
+    t_new = _make_uniform_grid(ts, float(fs), trim_ends=trim_ends)
+
+    # --- build output frame ---
+    out = pd.DataFrame({ts_col: t_new})
+
+    # numeric columns (we’ll skip quats for now)
+    num_cols = []
+    for c in df.columns:
+        if c == ts_col:
+            continue
+        if pd.api.types.is_numeric_dtype(df[c]):
+            num_cols.append(c)
+        else:
+            try_col = pd.to_numeric(df[c], errors="coerce")
+            if try_col.notna().any():
+                df[c] = try_col
+                num_cols.append(c)
+
+    has_quats = all(c in df.columns for c in quat_cols)
+    num_cols_no_quat = [c for c in num_cols if c not in quat_cols]
+
+    # linear interpolation for numeric non-quaternion columns
+    for c in num_cols_no_quat:
+        out[c] = _interp_column(ts, df[c].to_numpy(dtype=np.float64, copy=False), t_new)
+
+    # SLERP for quaternions
+    if has_quats:
+        Q = df.loc[:, quat_cols].to_numpy(dtype=np.float64, copy=False)
+        Qn = _slerp_times(ts, Q, t_new)
+        for j, c in enumerate(quat_cols):
+            out[c] = Qn[:, j]
+
+    # preserve column order as much as possible
+    ordered = [ts_col] + [c for c in df_imu.columns if c != ts_col and c in out.columns] + \
+              [c for c in out.columns if c not in df_imu.columns]
+    out = out.loc[:, ordered]
+
+    if inplace:
+        # mutate df_imu to contain the resampled content
+        df_imu.drop(df_imu.index, inplace=True)
+        for c in list(df_imu.columns):
+            df_imu.drop(columns=c, inplace=True)
+        for c in out.columns:
+            df_imu[c] = out[c].to_numpy()
+        return df_imu
+    else:
+        return out
+
+def _is_uniform_fs(ts: np.ndarray, fs: float, tol: float = 5e-6) -> bool:
+    """
+    Return True if timestamps are strictly increasing and (almost) uniform at 1/fs.
+    tol is in seconds; 5e-6 ~ 5 microseconds.
+    """
+    ts = np.asarray(ts, dtype=np.float64)
+    if ts.size < 3 or not np.all(np.isfinite(ts)):
+        return False
+    d = np.diff(ts)
+    if not np.all(d > 0):
+        return False
+    target = 1.0 / fs
+    return (np.max(np.abs(d - target)) <= tol)
+##########################
 
 def edit_csv():
     """
@@ -1216,6 +1395,12 @@ def edit_csv():
 
             # --- add/refresh derived columns (idempotent) ---
             #fix_length(df_imu, target_len=18_000)
+            folder_name = os.path.relpath(folder_path, DATA_ROOT)
+            if folder_name.startswith("beep_schedules_Z"):
+                ts = pd.to_numeric(df_imu["timestamp"], errors="coerce").to_numpy()
+                if not _is_uniform_fs(ts, fs=50.0):   # makes sure we don't upsample everytime we run edit_csv (once gets the job done)
+                    upsample_hz(df_imu, fs=50.0)
+            
             add_pitch_to_df(df_imu)  # modifies df_imu in place
             remove_columns(df_imu, ['roll_rad', 'yaw_rad'])
             #add_roll_to_df(df_imu)

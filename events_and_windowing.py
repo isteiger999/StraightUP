@@ -1351,19 +1351,91 @@ def upsample_hz(
     else:
         return out
 
-def _is_uniform_fs(ts: np.ndarray, fs: float, tol: float = 5e-6) -> bool:
+def _is_uniform_fs(
+    ts: np.ndarray,
+    fs: float,
+    *,
+    # --- new: row-count gate ---
+    len_gate: tuple = (18000, 5),   # (expected_rows, +/- slop). None to disable
+    # tolerances for the grid checks
+    abs_step_tol: float = 2e-5,     # step-size tolerance (seconds), ~20 microseconds
+    abs_tick_tol: float = 2e-5,     # per-sample quantization error to 1/fs grid
+    max_bad_frac: float = 1e-4,     # allow up to 0.01% off-grid steps (≈2 in ~18k)
+    allow_tiny_backsteps: float = 1e-9  # treat |negative step| <= this as zero (CSV fuzz)
+) -> bool:
     """
-    Return True if timestamps are strictly increasing and (almost) uniform at 1/fs.
-    tol is in seconds; 5e-6 ~ 5 microseconds.
+    Decide if timestamps 'ts' are already effectively uniform at 'fs' Hz.
+
+    Short-circuit #1 (row-count gate):
+      If len(ts) is within `expected_rows ± slop`, immediately return True.
+      With 6 minutes at 50 Hz, that's typically 18,000 rows; the gate avoids
+      re-upsampling already-processed files.
+
+    Otherwise, require BOTH:
+      - Monotonic non-decreasing (tiny negatives tolerated),
+      - Nearly all points lie on the 1/fs tick grid relative to t0
+        (successive tick indices differ by 1; tiny quantization error).
+
+    Parameters
+    ----------
+    ts : array-like of float
+        Timestamps in seconds. NaNs are dropped.
+    fs : float
+        Target sampling frequency in Hz (e.g., 50.0).
+    len_gate : (int, int) or None
+        (expected_rows, +/- slop). If None, disables the row-count short-circuit.
+    abs_step_tol : float
+        Tolerance for deviation of step sizes from 1/fs (seconds).
+    abs_tick_tol : float
+        Tolerance for per-sample distance to the ideal on-grid time (seconds).
+    max_bad_frac : float
+        Allowed fraction of steps whose tick index increment != 1.
+    allow_tiny_backsteps : float
+        Accept tiny negative diffs up to this magnitude as zero.
+
+    Returns
+    -------
+    bool
+        True if the series should be treated as already uniform at fs.
     """
     ts = np.asarray(ts, dtype=np.float64)
-    if ts.size < 3 or not np.all(np.isfinite(ts)):
+    ts = ts[np.isfinite(ts)]
+    n = ts.size
+    if n < 3:
         return False
+
+    # ---- Short-circuit: row-count gate (e.g., 18,000 ± 5) ----
+    if len_gate is not None:
+        expected, slop = int(len_gate[0]), int(len_gate[1])
+        if abs(n - expected) <= slop:
+            return True
+
+    # ---- Monotonicity (tolerate minuscule backsteps from CSV round-trips) ----
     d = np.diff(ts)
-    if not np.all(d > 0):
+    if np.any(d < -abs(allow_tiny_backsteps)):
         return False
-    target = 1.0 / fs
-    return (np.max(np.abs(d - target)) <= tol)
+
+    target = 1.0 / float(fs)
+
+    # ---- Fast step-distribution sanity (cheap) ----
+    step_err = np.abs(d - target)
+    if (np.nanpercentile(step_err, 99.5) <= abs_step_tol) and (np.nanmax(step_err) <= 10 * abs_step_tol):
+        return True
+
+    # ---- Tick-quantization test (robust) ----
+    t0 = ts[0]
+    k = np.rint((ts - t0) * fs)             # nearest tick indices
+    dk = np.diff(k)
+    bad_frac = float(np.mean(dk != 1))
+    if bad_frac > max_bad_frac:
+        return False
+
+    t_hat = t0 + (k / float(fs))            # back on the ideal grid
+    q_err = np.abs(ts - t_hat)
+    if np.nanpercentile(q_err, 99.5) > abs_tick_tol:
+        return False
+
+    return True
 ##########################
 
 def edit_csv():
@@ -1398,8 +1470,8 @@ def edit_csv():
             folder_name = os.path.relpath(folder_path, DATA_ROOT)
             if folder_name.startswith("beep_schedules_Z"):
                 ts = pd.to_numeric(df_imu["timestamp"], errors="coerce").to_numpy()
-                if not _is_uniform_fs(ts, fs=50.0):   # makes sure we don't upsample everytime we run edit_csv (once gets the job done)
-                    upsample_hz(df_imu, fs=50.0)
+                if not _is_uniform_fs(ts, fs=50.0):      # now skips if rows in [17,995 .. 18,005] too
+                    upsample_hz(df_imu, fs=50.0)         # mutate in place
             
             add_pitch_to_df(df_imu)  # modifies df_imu in place
             remove_columns(df_imu, ['roll_rad', 'yaw_rad'])

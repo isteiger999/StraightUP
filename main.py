@@ -15,7 +15,7 @@ warnings.filterwarnings("ignore", category=NotOpenSSLWarning)
 def main():
 
     participants = ['Abi', 'Ivan', 'Dario', 'Mohid', 'Claire', 'David',
-                    'ZDavB', 'ZDavC'      # 'ZDavA',
+                    'ZDavB', 'ZDavC'         # 'ZDavA',
                     ]                        # 'ZMohA', 'Svetlana'
     combinations, mean, std = find_combinations(participants, fraction = 0.5)  # fraction 0.1 means cut off  
     n = len(combinations)

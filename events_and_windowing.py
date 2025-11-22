@@ -1497,6 +1497,7 @@ def edit_csv():
                 print(f"⚠️ Scaled-delta skipped for: {csv_path}\n   ↳ {e}")
             '''
 
+
 def individual_accuracy(model, X_test, y_test, classes=(0, 1, 2)):
     """
     Print per-class accuracy (i.e., recall per class) for a 3-class classifier.

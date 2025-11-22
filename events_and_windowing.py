@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix
 import re
 import math
-
+from scipy import signal
 
 # count number of beep_schedules_folders:
 def _natural_key(path_or_name: str):
@@ -46,7 +46,7 @@ def folders_tot(type, list_comb):
         # Example: 'beep_schedules_*0'
         DATA_ROOT = os.path.join(os.getcwd(), "data")
         # pattern = os.path.join(DATA_ROOT, f'beep_schedules_{ending}*')
-        pattern = os.path.join(DATA_ROOT, f'beep_schedules_{ending}[0123]') # 10. November 2025: trying to use only 2 folders
+        pattern = os.path.join(DATA_ROOT, f'beep_schedules_{ending}[01]') # 10. November 2025: trying to use only 2 folders
         
         # Find all paths matching the specific pattern
         current_matches = sorted(glob.glob(pattern), key=_natural_key)
@@ -1355,8 +1355,6 @@ def _is_uniform_fs(
     ts: np.ndarray,
     fs: float,
     *,
-    # --- new: row-count gate ---
-    len_gate: tuple = (18000, 5),   # (expected_rows, +/- slop). None to disable
     # tolerances for the grid checks
     abs_step_tol: float = 2e-5,     # step-size tolerance (seconds), ~20 microseconds
     abs_tick_tol: float = 2e-5,     # per-sample quantization error to 1/fs grid
@@ -1366,12 +1364,7 @@ def _is_uniform_fs(
     """
     Decide if timestamps 'ts' are already effectively uniform at 'fs' Hz.
 
-    Short-circuit #1 (row-count gate):
-      If len(ts) is within `expected_rows ± slop`, immediately return True.
-      With 6 minutes at 50 Hz, that's typically 18,000 rows; the gate avoids
-      re-upsampling already-processed files.
-
-    Otherwise, require BOTH:
+    Requirements (no row-count shortcut here):
       - Monotonic non-decreasing (tiny negatives tolerated),
       - Nearly all points lie on the 1/fs tick grid relative to t0
         (successive tick indices differ by 1; tiny quantization error).
@@ -1382,8 +1375,6 @@ def _is_uniform_fs(
         Timestamps in seconds. NaNs are dropped.
     fs : float
         Target sampling frequency in Hz (e.g., 50.0).
-    len_gate : (int, int) or None
-        (expected_rows, +/- slop). If None, disables the row-count short-circuit.
     abs_step_tol : float
         Tolerance for deviation of step sizes from 1/fs (seconds).
     abs_tick_tol : float
@@ -1403,12 +1394,6 @@ def _is_uniform_fs(
     n = ts.size
     if n < 3:
         return False
-
-    # ---- Short-circuit: row-count gate (e.g., 18,000 ± 5) ----
-    if len_gate is not None:
-        expected, slop = int(len_gate[0]), int(len_gate[1])
-        if abs(n - expected) <= slop:
-            return True
 
     # ---- Monotonicity (tolerate minuscule backsteps from CSV round-trips) ----
     d = np.diff(ts)
@@ -1436,6 +1421,7 @@ def _is_uniform_fs(
         return False
 
     return True
+
 ##########################
 
 def edit_csv():
@@ -1470,11 +1456,12 @@ def edit_csv():
             folder_name = os.path.relpath(folder_path, DATA_ROOT)
             if folder_name.startswith("beep_schedules_Z"):
                 ts = pd.to_numeric(df_imu["timestamp"], errors="coerce").to_numpy()
-                if not _is_uniform_fs(ts, fs=50.0):      # now skips if rows in [17,995 .. 18,005] too
-                    upsample_hz(df_imu, fs=50.0)         # mutate in place
+                if len(ts) < 17998 or len(ts) > 18002:
+                    if not _is_uniform_fs(ts, fs=50.0):      # now skips if rows in [17,995 .. 18,005] too
+                        upsample_hz(df_imu, fs=50.0)         # mutate in place
             
             add_pitch_to_df(df_imu)  # modifies df_imu in place
-            remove_columns(df_imu, ['roll_rad', 'yaw_rad'])
+            #remove_columns(df_imu, ['roll_rad', 'yaw_rad'])
             #add_roll_to_df(df_imu)
             #add_yaw_to_df(df_imu)
             #normalize_chanels(df_imu)
@@ -2440,6 +2427,23 @@ def X_and_y(type, list_comb, label_anchor):
         Xsig = df_imu.iloc[:, 1:].to_numpy(dtype=np.float32, copy=False)
         n_ch = Xsig.shape[1]
 
+        ##### INCLUDE FILTERING HERE #####
+
+        copy = np.copy(Xsig)
+
+        fs = 50
+        fc = 2  # Cut-off frequency of the filter
+        w = fc / (fs / 2) # Normalize the frequency
+        b, a = signal.butter(4, w, 'low')
+        for chanel in range(9):     # signals 0->8 are filtered
+            Xsig[:, chanel] = signal.filtfilt(b, a, Xsig[:, chanel])
+
+        #plt.plot(copy[:, 4][:2000], label = "unfiltered")
+        #plt.plot(Xsig[:, 4][:2000], label = "filtered")
+        #plt.legend()
+        #plt.show()
+
+
         if X_tot is None:
             X_tot = np.zeros((n_folders * windows_per_rec, win_len_frames, n_ch), dtype=np.float32)
 
@@ -2763,8 +2767,10 @@ def X_and_y(type, list_comb, label_anchor):
         return (X_scaled, info) if return_info else X_scaled
     
     X_tot = scale_group_to_base_std(
-        base=["Abi[0-3]","Claire[0-3]"],
-        to_be_scaled=["Dario[0-3]","David[0-3]","Ivan[0-3]","Mohid[1-2]"]
+        base=["Abi[0-1]","Claire[0-1]", 
+              "ZDavB[0-1]", "ZDavC[0-1]",       # "ZDavA[0-1]",
+              ],                                # "ZMohA[0-1]"
+        to_be_scaled=["Dario[0-1]", "David[0-1]", "Ivan[0-1]", "Mohid[1]"]
     )
 
     return remove_edge_windows(X_tot, y_tot)

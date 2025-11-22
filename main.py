@@ -15,14 +15,14 @@ warnings.filterwarnings("ignore", category=NotOpenSSLWarning)
 def main():
 
     participants = ['Abi', 'Ivan', 'Dario', 'Mohid', 'Claire', 'David',
-                    'ZDavA', 'ZDavB', 'ZDavC',
-                    'ZMohA']         # 'Ivaan', 'Svetlana'
+                    'ZDavB', 'ZDavC'      # 'ZDavA',
+                    ]                        # 'ZMohA', 'Svetlana'
     combinations, mean, std = find_combinations(participants, fraction = 0.5)  # fraction 0.1 means cut off  
     n = len(combinations)
     print(combinations)
     
     edit_csv()
-    '''
+    
     cm_avg = ConfusionMatrixAverager(
         # optional, but nice, since your labels are known
         class_names=["upright", "transition", "slouch"],
@@ -60,7 +60,7 @@ def main():
     #print("✅ Saved averaged confusion matrix")
     
     #export_coreml(X_train, model, out_path="PostureCNN.mlpackage")
-    '''
+    
 
 if __name__ == '__main__':
     main() 

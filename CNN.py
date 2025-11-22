@@ -221,10 +221,10 @@ def CNN_model(X_train, y_train, X_val, y_val, verbose, n_classes=3):
         tf.keras.callbacks.EarlyStopping(
             monitor="val_f1_sl", mode="max", patience=12, restore_best_weights=True
         ),
-        tf.keras.callbacks.ModelCheckpoint(
-            "cnn_best_by_f1sl.weights.h5", save_weights_only=True, save_best_only=True,
-            monitor="val_f1_sl", mode="max"
-        ),
+        #tf.keras.callbacks.ModelCheckpoint(
+        #    "cnn_best_by_f1sl.weights.h5", save_weights_only=True, save_best_only=True,
+        #    monitor="val_f1_sl", mode="max"
+        #),
         tf.keras.callbacks.ReduceLROnPlateau(
             monitor="val_loss", mode="min", factor=0.5, patience=6, min_lr=1e-5
         ),

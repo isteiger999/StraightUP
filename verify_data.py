@@ -642,14 +642,14 @@ def plot_reconstructed_signal_slider(
     return fig, ax, s_start
 
 def main():
-    #per_file_std, per_participant_avg_std, overall_avg_std = calculate_std(['ZDavB', 'ZDavA', 'Abi', 'Ivan', 'Dario', 'Mohid', 'Claire', 'David', 'Svetlana'])
+    #per_file_std, per_participant_avg_std, overall_avg_std = calculate_std(['ZMohA', 'ZDavC', 'ZDavB', 'ZDavA', 'Abi', 'Ivan', 'Dario', 'Mohid', 'Claire', 'David', 'Svetlana'])
     #print(f"Per file std {per_file_std}")
     #print(f"Per participant std {per_participant_avg_std}")
     #print(f"Overall std {overall_avg_std}")
     # Plot signals with slides
     
-    X_train, y_train = X_and_y("train", ['ZDavC', 'ZDavA', 'ZDavA'],
-                               label_anchor='center') #['Mohid', 'Svetlana', 'Claire', 'Dario', 'Ivan', 'David', 'Abi']
+    X_train, y_train = X_and_y("train", ['ZMohA', 'ZDavC', 'ZDavC'],
+                               label_anchor='center')   #['Mohid', 'Svetlana', 'Claire', 'Dario', 'Ivan', 'David', 'Abi']
     #plot_label_verlauf(y_train, length=2900)
     
     plot_reconstructed_signal_slider(
@@ -659,6 +659,21 @@ def main():
         view_windows=200,
         start_window=0
     )
+    
+
+    # Checking if upsampling to 50Hz worked (visually)
+    '''
+    df_ZMohA = pd.read_csv("data/beep_schedules_ZMohA0/airpods_motion_1763483071.csv")
+    df_raw = pd.read_csv("airpods_motion_1763483071.csv")
+    t_interp = df_ZMohA.iloc[:, 0]
+    acc_y_interp = df_ZMohA.iloc[:, 5]
+    t_raw = df_raw.iloc[:, 0]
+    acc_y_raw = df_raw.iloc[:, 5]
+    plt.plot(t_interp[:50], acc_y_interp[:50].values, label = "upsampled")
+    plt.plot(t_raw[:50], acc_y_raw[:50].values, label = "original sample freq")
+    plt.legend()
+    plt.show()
+    '''
     '''
     ##
     # Delete delta files:

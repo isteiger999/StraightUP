@@ -1874,7 +1874,7 @@ def save_confusion_matrix_for_run(history, X, y,
     return cma.save_figure(model_tag=model_tag, dpi=dpi, normalize=normalize)
 #----------------------------  
 
-def find_shapes():
+def find_shapes(len_window_sec, stride):
     # pick the first IMU file under data/*/
     DATA_ROOT = os.path.join(os.getcwd(), "data")
     imu_glob = os.path.join(DATA_ROOT, 'beep_schedules_*', 'airpods_motion_*.csv')
@@ -1888,8 +1888,8 @@ def find_shapes():
     dt = np.diff(t)
     dt_med = float(np.median(dt)) if dt.size > 0 else (1.0/50.0)
     fs = (1.0 / dt_med) if dt_med > 0 else 50.0
-    stride = 0.5
-    len_window_sec = 1.5
+    #stride = 0.5
+    #len_window_sec = 1.5
 
     win_len_frames = int(round(len_window_sec * fs))      # samples per window
     stride_frames = int(round(stride * fs))    # samples per stride
@@ -2340,8 +2340,8 @@ def calculate_std(matching_folders):
 
     return per_file_std, per_participant_avg_std, overall_avg_std
 
-
-def X_and_y(type, list_comb, label_anchor):
+# FOR DL MODELS
+def X_and_y(type, list_comb, len_window_sec, stride, label_anchor):
     """
     Build X (windows) and y (labels) across selected folders.
 
@@ -2362,7 +2362,7 @@ def X_and_y(type, list_comb, label_anchor):
         anchor = "end"
 
     matching_folders, n_folders = folders_tot(type, list_comb)
-    _, _, _, win_len_frames, stride_frames, _, windows_per_rec, stride, len_window_sec = find_shapes()
+    _, _, _, win_len_frames, stride_frames, _, windows_per_rec, stride, len_window_sec = find_shapes(len_window_sec, stride)
     
     ## Calculate std from 'train' participants
     # ...
@@ -2438,7 +2438,7 @@ def X_and_y(type, list_comb, label_anchor):
         b, a = signal.butter(4, w, 'low')
         for chanel in range(9):     # signals 0->8 are filtered
             Xsig[:, chanel] = signal.filtfilt(b, a, Xsig[:, chanel])
-
+        
         #plt.plot(copy[:, 4][:2000], label = "unfiltered")
         #plt.plot(Xsig[:, 4][:2000], label = "filtered")
         #plt.legend()
@@ -2768,10 +2768,65 @@ def X_and_y(type, list_comb, label_anchor):
         return (X_scaled, info) if return_info else X_scaled
     
     X_tot = scale_group_to_base_std(
-        base=["Abi[0-1]","Claire[0-1]", 
+        base=["Abi[0-1]", "Claire[0-1]",        # "Svetlana[0-1]" 
               "ZDavB[0-1]", "ZDavC[0-1]",       # "ZDavA[0-1]",
               ],                                # "ZMohA[0-1]"
         to_be_scaled=["Dario[0-1]", "David[0-1]", "Ivan[0-1]", "Mohid[1]"]
     )
 
     return remove_edge_windows(X_tot, y_tot)
+
+# FURTHER FEATURE EXTRACTION FOR ML MODELS
+def X_and_y_features(X):
+    """
+    X: array of shape (n_samples, n_timesteps, n_channels)
+    returns X_f: array of shape (n_samples, n_channels * n_features_per_channel)
+    """
+
+    n_samples, n_steps, n_channels = X.shape
+    
+    # Number of features we extract from each channel (mean, std, quantile, min, max,...)
+    n_feat_per_ch = 11
+    
+    # Total number of features = channels * features_per_channel
+    X_f = np.zeros((n_samples, n_feat_per_ch * n_channels))
+    
+    dt = 1.0 / 50.0  # 50 Hz
+    
+    mid = n_steps // 2
+    q1_idx = n_steps // 4
+    q3_idx = (3 * n_steps) // 4
+
+    for i in range(n_samples):
+        feats_all_channels = []
+
+        for ch in range(n_channels):
+            x = X[i, :, ch]  # time series of this window & channel
+
+            feats = np.array([
+                # three central derivatives at different positions
+                (x[mid + 1] - x[mid - 1]) / (2.0 * dt),
+                (x[q1_idx + 1] - x[q1_idx - 1]) / (2.0 * dt),
+                (x[q3_idx + 1] - x[q3_idx - 1]) / (2.0 * dt),
+
+                # basic stats
+                np.mean(x),
+                np.min(x),
+                np.max(x),
+
+                # quantiles
+                np.quantile(x, 0.25),
+                np.quantile(x, 0.50),
+                np.quantile(x, 0.75),
+
+                # first & last samples
+                x[-1],
+                x[0],
+            ])
+
+            feats_all_channels.append(feats)
+
+        # Concatenate all channels' features into one 1D vector
+        X_f[i, :] = np.concatenate(feats_all_channels)
+
+    return X_f

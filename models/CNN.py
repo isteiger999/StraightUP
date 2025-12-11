@@ -1,10 +1,10 @@
 from constants import set_seeds, configure_tensorflow
 set_seeds()
 configure_tensorflow()
-import numpy as np
 import tensorflow as tf
 from tensorflow.keras import layers, models, regularizers
-
+import coremltools as ct
+import numpy as np
 
 # ---------- Balanced Accuracy (metric you can maximize) ----------
 class BalancedAccuracy(tf.keras.metrics.Metric):
@@ -125,6 +125,7 @@ class BalancedAccuracySubset(tf.keras.metrics.Metric):
 
     def reset_state(self):
         self.tp.assign(tf.zeros_like(self.tp)); self.pos.assign(tf.zeros_like(self.pos))
+
 # ---------- F1 Score for upright class (combines recall and precision)
 class F1ForClass(tf.keras.metrics.Metric):
     """
@@ -171,79 +172,46 @@ class F1ForClass(tf.keras.metrics.Metric):
 
 # ----------
 
-# ---------- TCN building blocks ----------
-def tcn_block(x, filters, k, dropout, l2, dilation):
-    y = layers.Conv1D(filters, k, padding="causal", dilation_rate=dilation,
-                      kernel_regularizer=regularizers.l2(l2))(x)
-    y = layers.BatchNormalization()(y)
-    y = layers.Activation("relu")(y)
-    y = layers.Dropout(dropout)(y)
-    y = layers.SpatialDropout1D(dropout)(y)
+def CNN_model(X_train, y_train, X_val, y_val, verbose, n_classes=3):
+    T = X_train.shape[1]
+    n_ch = X_train.shape[2]
 
-    y = layers.Conv1D(filters, k, padding="causal", dilation_rate=dilation,
-                      kernel_regularizer=regularizers.l2(l2))(y)
-    y = layers.BatchNormalization()(y)
+    # labels should be integer class IDs: 0,1,2
+    y_train = y_train.squeeze().astype("int32")
+    y_val   = y_val.squeeze().astype("int32")
 
-    res = x
-    if res.shape[-1] != filters:
-        res = layers.Conv1D(filters, 1, padding="same",
-                            kernel_regularizer=regularizers.l2(l2))(res)
-    y = layers.add([res, y])
-    return layers.Activation("relu")(y)
+    l2 = regularizers.l2(2e-3)
 
-def blocks_for_full_rf(seq_len, k, max_blocks=12):
-    # Two causal convs per block → RF grows by 2*(k-1)*d each block (with doubling dilation)
-    rf = 1
-    d = 1
-    blocks = 0
-    while rf < seq_len and blocks < max_blocks:
-        rf += 2 * (k - 1) * d
-        d *= 2
-        blocks += 1
-    return blocks
-
-# ---------- Train/Eval wrapper ----------
-def train_eval_tcn(X_train, y_train, X_val, y_val, verbose,
-                   *, kernel_size=5, base_filters=32, dropout=0.25, l2=2e-3,
-                   max_epochs=1000, n_classes=3):
-    tf.keras.utils.set_random_seed(42)
-
-    # Shapes & dtypes
-    X_train = np.asarray(X_train, dtype=np.float32)
-    X_val   = np.asarray(X_val,   dtype=np.float32)
-    y_train = np.asarray(y_train).squeeze().astype(np.int32)   # <-- integers for sparse CE
-    y_val   = np.asarray(y_val).squeeze().astype(np.int32)
-
-    assert X_train.ndim == 3 and X_val.ndim == 3, "X must be [N, T, C]"
-    T, C = X_train.shape[1], X_train.shape[2]
-    n_blocks = blocks_for_full_rf(T, kernel_size)
-
-    # Model
-    x_in = layers.Input(shape=(T, C))
+    # Per-feature normalization (fit on train only)
     norm = layers.Normalization(axis=-1)
-    norm.adapt(X_train)
-    x = norm(x_in)
+    norm.adapt(X_train.astype("float32"))
+    
+    # used to be: 32, 64, 96
+    cnn = models.Sequential([
+        layers.Input(shape=(T, n_ch)),
+        norm,
+        layers.Conv1D(24, 9, padding="causal", activation="relu", kernel_regularizer=l2),
+        layers.MaxPooling1D(2),
 
-    d = 1
-    for _ in range(n_blocks):
-        x = tcn_block(x, base_filters, kernel_size, dropout, l2, dilation=d)
-        d *= 2
+        layers.Conv1D(36, 7,  padding="causal", activation="relu", kernel_regularizer=l2),
+        layers.MaxPooling1D(2),
 
-    x = layers.GlobalAveragePooling1D()(x)
-    x = layers.Dropout(0.40)(x)
-    x = layers.Dense(64, activation="relu", kernel_regularizer=regularizers.l2(l2))(x)
-    x = layers.Dropout(0.30)(x)
-    y = layers.Dense(n_classes, activation="softmax")(x)
-
-    model = models.Model(x_in, y)
-    loss = WeightedSparseCCE(class_weights=[0.8, 1.0, 1.2], from_logits=False)
-    model.compile(
+        layers.Conv1D(64, 5,  padding="causal", activation="relu", kernel_regularizer=l2),
+        layers.MaxPooling1D(2), # 64
+        
+        layers.GlobalAveragePooling1D(),
+        layers.Dropout(0.30),
+        layers.Dense(64, activation="relu", kernel_regularizer=l2),
+        layers.Dropout(0.20),
+        layers.Dense(n_classes, activation="softmax")   # 3 logits -> probs
+    ])
+    ## These metrices are then shown in the cnn.eval on X_val and y_val
+    loss = WeightedSparseCCE(class_weights=[0.8, 1.0, 1.15], from_logits=False)
+    cnn.compile(
         loss=loss,
         optimizer=tf.keras.optimizers.legacy.Adam(5e-4),
         metrics=[
             BalancedAccuracySubset(include=(1,2), n_classes=n_classes, name="BA_no_upr"),
-            #RecallForClass(class_id=2, n_classes=n_classes, name="rec_sl"),
-            #RecallForClass(class_id=1, n_classes=n_classes, name="rec_trans"),
             F1ForClass(class_id=2, name="f1_sl"),  
         ],
     )
@@ -251,10 +219,6 @@ def train_eval_tcn(X_train, y_train, X_val, y_val, verbose,
     callbacks = [
         tf.keras.callbacks.EarlyStopping(
             monitor="val_f1_sl", mode="max", patience=12, restore_best_weights=True
-        ),
-        tf.keras.callbacks.ModelCheckpoint(
-            "tcn_best_by_f1sl.weights.h5", save_weights_only=True, save_best_only=True,
-            monitor="val_f1_sl", mode="max"
         ),
         tf.keras.callbacks.ReduceLROnPlateau(
             monitor="val_loss", mode="min", factor=0.5, patience=6, min_lr=1e-5
@@ -265,13 +229,30 @@ def train_eval_tcn(X_train, y_train, X_val, y_val, verbose,
     X_train_shuffled = X_train[shuffle_idx]
     y_train_shuffled = y_train[shuffle_idx]
 
-    history = model.fit(
+    history = cnn.fit(
         X_train_shuffled, y_train_shuffled,
         validation_data=(X_val, y_val),
-        epochs=max_epochs,
-        batch_size=64,
+        epochs=200,
+        batch_size=128,
         shuffle=False,
         callbacks=callbacks,
         verbose=verbose,
     )
-    return model, history
+
+    name = "CNN"
+
+    return cnn, history, name
+
+
+def export_coreml(X_train, model, out_path="PostureCNN.mlpackage"):
+    T = X_train.shape[1]
+    n_ch = X_train.shape[2]
+    mlmodel = ct.convert(
+        model,
+        source="tensorflow",
+        convert_to="mlprogram",
+        inputs=[ct.TensorType(name=model.inputs[0].name.split(":")[0],
+                              shape=(1, T, n_ch), dtype=np.float32)]
+    )
+    mlmodel.save(out_path)   # <- .mlpackage
+    print(f"✅ Saved {out_path}")

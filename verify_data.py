@@ -642,7 +642,7 @@ def plot_reconstructed_signal_slider(
     return fig, ax, s_start
 
 def main():
-    #per_file_std, per_participant_avg_std, overall_avg_std = calculate_std(['ZMohA', 'ZDavC', 'ZDavB', 'ZDavA', 'Abi', 'Ivan', 'Dario', 'Mohid', 'Claire', 'David', 'Svetlana'])
+    per_file_std, per_participant_avg_std, overall_avg_std = calculate_std(['ZMohA', 'ZDavC', 'ZDavB', 'ZDavA', 'Abi', 'Ivan', 'Dario', 'Mohid', 'Claire', 'David', 'Svetlana'])
     #print(f"Per file std {per_file_std}")
     #print(f"Per participant std {per_participant_avg_std}")
     #print(f"Overall std {overall_avg_std}")

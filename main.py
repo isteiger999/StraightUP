@@ -47,9 +47,13 @@ def main():
         X_val, y_val = X_and_y("val", list_comb, len_window_sec, stride, label_anchor="center")
         X_test, y_test = X_and_y("test", list_comb, len_window_sec, stride, label_anchor="center")
 
+        count_all_zero_windows(X_train)
+        count_all_zero_windows(X_val)
+        count_all_zero_windows(X_test)
+
         # 2. DL - Classification
-        #model, history, name = CNN_model(X_train, y_train, X_val, y_val, verbose = 1)
-        model, history, name = train_eval_tcn(X_train, y_train, X_val, y_val, verbose=1)
+        model, history, name = CNN_model(X_train, y_train, X_val, y_val, verbose = 1)
+        #model, history, name = train_eval_tcn(X_train, y_train, X_val, y_val, verbose=1)
         #model, history, name = LSTM_angles(X_train, y_train, X_val, y_val, verbose = 1)
         #model, history, name = TabPFN(X_and_y_features(X_train), y_train, X_and_y_features(X_val), y_val) 
 

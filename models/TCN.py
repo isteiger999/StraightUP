@@ -204,7 +204,7 @@ def blocks_for_full_rf(seq_len, k, max_blocks=12):
 
 # ---------- Train/Eval wrapper ----------
 def train_eval_tcn(X_train, y_train, X_val, y_val, verbose,
-                   *, kernel_size=5, base_filters=16, dropout=0.20, l2=2e-3,  # had 8 filters before
+                   *, kernel_size=5, base_filters=8, dropout=0.20, l2=2e-3,  # had 8 filters before
                    max_epochs=1000, n_classes=3):
     tf.keras.utils.set_random_seed(42)
 

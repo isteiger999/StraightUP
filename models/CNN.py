@@ -190,19 +190,19 @@ def CNN_model(X_train, y_train, X_val, y_val, verbose, n_classes=3):
     cnn = models.Sequential([
         layers.Input(shape=(T, n_ch)),
         norm,
-        layers.Conv1D(24, 9, padding="causal", activation="relu", kernel_regularizer=l2),
+        layers.Conv1D(24, 9, padding="causal", activation="relu", kernel_regularizer=l2), # 9
         layers.MaxPooling1D(2),
 
-        layers.Conv1D(36, 7,  padding="causal", activation="relu", kernel_regularizer=l2),
+        layers.Conv1D(36, 9,  padding="causal", activation="relu", kernel_regularizer=l2), # 7
         layers.MaxPooling1D(2),
 
-        layers.Conv1D(64, 5,  padding="causal", activation="relu", kernel_regularizer=l2),
+        layers.Conv1D(64, 9,  padding="causal", activation="relu", kernel_regularizer=l2), # 5
         layers.MaxPooling1D(2), # 64
-        
+
         layers.GlobalAveragePooling1D(),
         layers.Dropout(0.30),
         layers.Dense(64, activation="relu", kernel_regularizer=l2),
-        layers.Dropout(0.20),
+        layers.Dropout(0.20), # 0.20 befoore
         layers.Dense(n_classes, activation="softmax")   # 3 logits -> probs
     ])
     ## These metrices are then shown in the cnn.eval on X_val and y_val

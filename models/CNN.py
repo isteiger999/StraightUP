@@ -180,7 +180,7 @@ def CNN_model(X_train, y_train, X_val, y_val, verbose, n_classes=3):
     y_train = y_train.squeeze().astype("int32")
     y_val   = y_val.squeeze().astype("int32")
 
-    l2 = regularizers.l2(2e-3)
+    l2 = regularizers.l2(2e-3)  # 1e-3 was worse (try 3e-3)
 
     # Per-feature normalization (fit on train only)
     norm = layers.Normalization(axis=-1)
@@ -194,15 +194,15 @@ def CNN_model(X_train, y_train, X_val, y_val, verbose, n_classes=3):
         layers.MaxPooling1D(2),
 
         layers.Conv1D(36, 9,  padding="causal", activation="relu", kernel_regularizer=l2), # 7
-        layers.MaxPooling1D(2),
+        layers.MaxPooling1D(2),  # 36 (13. Dez)
 
         layers.Conv1D(64, 9,  padding="causal", activation="relu", kernel_regularizer=l2), # 5
-        layers.MaxPooling1D(2), # 64
+        layers.MaxPooling1D(2), # 64 (13. Dez) # 7
 
         layers.GlobalAveragePooling1D(),
-        layers.Dropout(0.30),
+        layers.Dropout(0.30), # 0.30 before
         layers.Dense(64, activation="relu", kernel_regularizer=l2),
-        layers.Dropout(0.20), # 0.20 befoore
+        layers.Dropout(0.20), # 0.20 before
         layers.Dense(n_classes, activation="softmax")   # 3 logits -> probs
     ])
     ## These metrices are then shown in the cnn.eval on X_val and y_val

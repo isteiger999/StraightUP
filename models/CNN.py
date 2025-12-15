@@ -180,7 +180,7 @@ def CNN_model(X_train, y_train, X_val, y_val, verbose, n_classes=3):
     y_train = y_train.squeeze().astype("int32")
     y_val   = y_val.squeeze().astype("int32")
 
-    l2 = regularizers.l2(2e-3)  # 1e-3 was worse (try 3e-3)
+    l2 = regularizers.l2(2e-3)  # 1e-3 was worse (try 3e-3) --> also worse
 
     # Per-feature normalization (fit on train only)
     norm = layers.Normalization(axis=-1)

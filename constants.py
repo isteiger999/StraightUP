@@ -2,6 +2,7 @@ import os
 os.environ["PYTHONHASHSEED"] = "42"
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
+import torch
 import random
 import numpy as np
 import tensorflow as tf
@@ -49,6 +50,16 @@ def set_seeds(seed=42):
     random.seed(seed)
     np.random.seed(seed)
     tf.random.set_seed(seed)
+    torch.manual_seed(seed)
+    
+    # 4. PyTorch (MPS/M2 GPU specific)
+    # torch.manual_seed actually covers MPS, but some versions benefit from this:
+    if torch.backends.mps.is_available():
+        torch.mps.manual_seed(seed)
+        
+    # 5. For general portability (if you ever run this on Nvidia/CUDA)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
     
 def configure_tensorflow():
     # For additional TensorFlow reproducibility

@@ -3,6 +3,7 @@ set_seeds()
 configure_tensorflow()
 import tensorflow as tf
 from tensorflow.keras import layers, models, regularizers
+from tensorflow.keras.optimizers import AdamW
 import coremltools as ct
 import numpy as np
 
@@ -210,6 +211,7 @@ def CNN_model(X_train, y_train, X_val, y_val, verbose, n_classes=3):
     cnn.compile(
         loss=loss,
         optimizer=tf.keras.optimizers.legacy.Adam(5e-4),
+        #optimizer=AdamW(5e-4),
         metrics=[
             BalancedAccuracySubset(include=(1,2), n_classes=n_classes, name="BA_no_upr"),
             F1ForClass(class_id=2, name="f1_sl"),  

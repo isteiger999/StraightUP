@@ -15,6 +15,7 @@ from models.RF_class import RF_cl
 from models.SVM_class import SVM_cl
 from models.TabPFN_class import TabPFN
 from models.XGBoost_class import XGBoost_cl
+from models.transformer import train_transformer
 
 
 warnings.filterwarnings("ignore", category=NotOpenSSLWarning)
@@ -29,7 +30,7 @@ def main():
     n = len(combinations)
     print(combinations)
     
-    len_window_sec = 1.5
+    len_window_sec = 1.5 #1.5
     stride = 0.5
 
     edit_csv()
@@ -48,20 +49,26 @@ def main():
         X_test, y_test = X_and_y("test", list_comb, len_window_sec, stride, label_anchor="center")
 
         # 2. DL - Classification
-        model, history, name = CNN_model(X_train, y_train, X_val, y_val, verbose = 1)
+        #model, history, name = CNN_model(X_train, y_train, X_val, y_val, verbose = 1)
         #model, history, name = train_eval_tcn(X_train, y_train, X_val, y_val, verbose=1)
         #model, history, name = LSTM_angles(X_train, y_train, X_val, y_val, verbose = 1)
         #model, history, name = TabPFN(X_and_y_features(X_train), y_train, X_and_y_features(X_val), y_val) 
-
+        
+        # Transformer only
+        model, history, name, device = train_transformer(X_train, y_train, X_val, y_val, epochs=150)
+        
         ## ML - Classification ##
         #model, history, name = RF_cl(X_and_y_features(X_train), y_train, X_and_y_features(X_val), y_val)  
         #model, history, name = SVM_cl(X_and_y_features(X_train), y_train, X_and_y_features(X_val), y_val) 
         #model, history, name = XGBoost_cl(X_and_y_features(X_train), y_train, X_and_y_features(X_val), y_val) 
 
         # 3. Testing the CNN
-        if name not in ["TabPFN", "RF", "SVM (RBF)", "XGBoost"]:
+        
+        if name not in ["TabPFN", "RF", "SVM (RBF)", "XGBoost", "transformer"]:
             scores = model.evaluate(X_test, y_test, return_dict=True, verbose = 1)
             cm_avg.add(history, X_test, y_test, batch_size=128, verbose=0)    # Confusion Matrix
+        elif name == "transformer":
+            scores = model.evaluate(X_test, y_test, return_dict=True, verbose=1)
         else:
             scores = model.evaluate(X_and_y_features(X_test), y_test, return_dict=True, verbose=1)
 

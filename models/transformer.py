@@ -8,13 +8,15 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score
 import numpy as np
+from torchmetrics.classification import F1Score
+import warnings
 
 num_classes = 3
 patch_size = 25                      # meaning #patch_size of timesteps are corresponding to one token
-sequence_length = 75                 # 1.5 sec woth 50Hz
+sequence_length = 75                 # 1.5 sec with 50Hz
 attention_heads = 8
 embed_dim = 320                      # usually 768 or 512
-transformer_blocks = 4
+transformer_blocks = 6
 mlp_nodes = 512
 num_channels = 9
 nr_tokens = sequence_length // patch_size
@@ -39,6 +41,10 @@ class TransformerEncoder(nn.Module):
         self.mlp = nn.Sequential(
             nn.Linear(embed_dim, mlp_nodes),
             nn.GELU(),
+            nn.Dropout(p=0.2),
+            nn.Linear(mlp_nodes, mlp_nodes),
+            nn.GELU(),
+            nn.Dropout(p=0.2),
             nn.Linear(mlp_nodes, embed_dim)
         )
 
@@ -118,16 +124,16 @@ class Transformer(nn.Module):
         y_pred_12 = np.where(np.isin(y_pred_subset, [1, 2]), y_pred_subset, -1)
 
         if len(y_12) > 0:
-            # Now y_true has [1, 2] and y_pred has [1, 2, -1]. 
-            # Since -1 is never in y_true, it counts as a wrong prediction 
-            # without triggering the "unseen class" warning.
-            bal_acc_12 = balanced_accuracy_score(y_12, y_pred_12)
+            with warnings.catch_warnings():
+                # This silences the specific warning about y_pred having classes not in y_true
+                warnings.filterwarnings("ignore", message="y_pred contains classes not in y_true")
+                bal_acc_12 = balanced_accuracy_score(y_12, y_pred_subset)
         else:
             bal_acc_12 = 0.0
 
         # f1 per class
         f1_scores = f1_score(y_true=y, y_pred=y_pred, average=None, labels=[0, 1, 2])
-
+        print(f"Test Set F1_slouch: {f1_scores[2]}")
         if return_dict:
             return {
                 "BA_no_upr": bal_acc_12,
@@ -156,14 +162,17 @@ def train_transformer(X_train, y_train, X_val, y_val, epochs=150):
     weights = torch.tensor([0.8, 1.0, 1.15], dtype=torch.float).to(device)
     criterion = nn.CrossEntropyLoss(weight=weights)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5, factor=0.5, min_lr=5e-6)
+    f1_train = F1Score(task='multiclass', num_classes=num_classes).to(device)
+    f1_val = F1Score(task='multiclass', num_classes=num_classes).to(device)
 
     # for early stopping
     early_st_patience = 10
-    best_val = math.inf
+    best_val = -math.inf
     bad_epochs = 0
     best_state = None
 
     transformer.train()
+    f1_train.reset()
     for epoch in range(epochs):
         train_loss = 0
         total, correct = 0, 0
@@ -177,9 +186,11 @@ def train_transformer(X_train, y_train, X_val, y_val, epochs=150):
             optimizer.step()
             
             predicted = torch.argmax(y_pred, dim=1)
+            f1_train.update(predicted, y)
             correct += (predicted==y).sum().item()
             total += x.shape[0]
 
+        epoch_f1_train = f1_train.compute()
         train_loss /= total
         train_acc = correct/total
 
@@ -187,21 +198,25 @@ def train_transformer(X_train, y_train, X_val, y_val, epochs=150):
         total_val, correct_val = 0, 0
         transformer.eval()
         val_loss = 0
+        f1_val.reset()
+
         with torch.no_grad():
             for x, y in val_loader:
                 x, y = x.to(device), y.to(device)
                 pred = transformer(x)
                 val_loss += criterion(pred, y).item()
+                f1_val.update(torch.argmax(pred, dim=1), y)
                 correct_val += (torch.argmax(pred, dim=1)==y).sum().item()
                 total_val += x.shape[0]
 
+        epoch_f1_val = f1_val.compute()
         val_acc = correct_val/total_val
         val_loss /= total_val
         scheduler.step(val_loss)
 
         # early stopping
-        if val_loss < best_val:
-            best_val = val_loss
+        if epoch_f1_val > best_val:       # <
+            best_val = epoch_f1_val       # val_loss
             bad_epochs = 0
             best_state = copy.deepcopy(transformer.state_dict())
         else:
@@ -211,7 +226,7 @@ def train_transformer(X_train, y_train, X_val, y_val, epochs=150):
                     transformer.load_state_dict(best_state)
                 break
             
-        print(f"Epoch {epoch} train_acc: {train_acc} || val_acc: {val_acc} || train_loss: {train_loss} || val_loss: {val_loss} || lr: {optimizer.param_groups[0]['lr']:.6f}")
+        print(f"Epoch {epoch} train_f1: {epoch_f1_train} || val_f1: {epoch_f1_val} || train_loss: {train_loss} || val_loss: {val_loss} || lr: {optimizer.param_groups[0]['lr']:.6f}")
 
     history, name = None, "transformer"
 

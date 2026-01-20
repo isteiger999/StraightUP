@@ -8,23 +8,24 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score
 import numpy as np
-from torchmetrics.classification import F1Score
+from torchmetrics.classification import F1Score, MulticlassF1Score
 import warnings
 
 num_classes = 3
-patch_size = 25                      # meaning #patch_size of timesteps are corresponding to one token
+patch_size = 15                      # meaning #patch_size of timesteps are corresponding to one token
+stride = 15
 sequence_length = 75                 # 1.5 sec with 50Hz
 attention_heads = 8
 embed_dim = 320                      # usually 768 or 512
 transformer_blocks = 6
 mlp_nodes = 512
 num_channels = 9
-nr_tokens = sequence_length // patch_size
+nr_tokens = (sequence_length-patch_size) // stride + 1
 
 class PatchEmbdedding(nn.Module):
     def __init__(self):
         super(PatchEmbdedding, self).__init__()
-        self.patch_embed = nn.Conv1d(in_channels=num_channels, out_channels=embed_dim, kernel_size = patch_size, stride = patch_size)
+        self.patch_embed = nn.Conv1d(in_channels=num_channels, out_channels=embed_dim, kernel_size = patch_size, stride = stride)
     
     def forward(self, x):
         x = x.transpose(1, 2)
@@ -62,6 +63,9 @@ class MLP_Head(nn.Module):
         super().__init__()
         self.ln1 = nn.LayerNorm(embed_dim)
         self.mlp_head = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim),
+            nn.GELU(),
+            nn.Dropout(p=0.2),
             nn.Linear(embed_dim, num_classes)
         )
 
@@ -162,18 +166,18 @@ def train_transformer(X_train, y_train, X_val, y_val, epochs=150):
     weights = torch.tensor([0.8, 1.0, 1.15], dtype=torch.float).to(device)
     criterion = nn.CrossEntropyLoss(weight=weights)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5, factor=0.5, min_lr=5e-6)
-    f1_train = F1Score(task='multiclass', num_classes=num_classes).to(device)
-    f1_val = F1Score(task='multiclass', num_classes=num_classes).to(device)
+    f1_val = MulticlassF1Score(num_classes=num_classes, average=None).to(device)
+    f1_train = MulticlassF1Score(num_classes=num_classes, average=None).to(device)  # optional
 
     # for early stopping
     early_st_patience = 10
-    best_val = -math.inf
+    best_val = -float("inf")
     bad_epochs = 0
     best_state = None
 
-    transformer.train()
-    f1_train.reset()
     for epoch in range(epochs):
+        transformer.train()
+        f1_train.reset()
         train_loss = 0
         total, correct = 0, 0
         for x, y in train_loader:
@@ -190,7 +194,8 @@ def train_transformer(X_train, y_train, X_val, y_val, epochs=150):
             correct += (predicted==y).sum().item()
             total += x.shape[0]
 
-        epoch_f1_train = f1_train.compute()
+        train_f1_per_class = f1_train.compute()
+        train_f1_cls2 = train_f1_per_class[2].item()
         train_loss /= total
         train_acc = correct/total
 
@@ -209,14 +214,15 @@ def train_transformer(X_train, y_train, X_val, y_val, epochs=150):
                 correct_val += (torch.argmax(pred, dim=1)==y).sum().item()
                 total_val += x.shape[0]
 
-        epoch_f1_val = f1_val.compute()
+        val_f1_per_class = f1_val.compute()
+        val_f1_cls2 = val_f1_per_class[2].item()
         val_acc = correct_val/total_val
         val_loss /= total_val
         scheduler.step(val_loss)
 
         # early stopping
-        if epoch_f1_val > best_val:       # <
-            best_val = epoch_f1_val       # val_loss
+        if val_f1_cls2 > best_val:       # <
+            best_val = val_f1_cls2       # val_loss
             bad_epochs = 0
             best_state = copy.deepcopy(transformer.state_dict())
         else:
@@ -226,7 +232,7 @@ def train_transformer(X_train, y_train, X_val, y_val, epochs=150):
                     transformer.load_state_dict(best_state)
                 break
             
-        print(f"Epoch {epoch} train_f1: {epoch_f1_train} || val_f1: {epoch_f1_val} || train_loss: {train_loss} || val_loss: {val_loss} || lr: {optimizer.param_groups[0]['lr']:.6f}")
+        print(f"Epoch {epoch} train_f1: {train_f1_cls2} || val_f1: {val_f1_cls2} || train_loss: {train_loss} || val_loss: {val_loss} || lr: {optimizer.param_groups[0]['lr']:.6f}")
 
     history, name = None, "transformer"
 
